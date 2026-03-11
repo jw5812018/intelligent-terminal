@@ -611,9 +611,39 @@ namespace winrt::TerminalApp::implementation
     void TerminalPage::ToggleCoordinator()
     {
         _runOnUIThreadVoid(*this, [&]() {
+            // Lazily initialize the coordinator panel if it hasn't been set up yet.
+            // This allows the toggle command to work even when the coordinator
+            // wasn't started automatically (e.g. no commandline configured).
             if (!_coordinatorInitialized)
             {
-                return;
+                const auto& globals = _settings.GlobalSettings();
+                auto commandline = std::wstring{ globals.AiCoordinatorCommandline() };
+
+                // Fall back to the default shell if no coordinator CLI is configured.
+                if (commandline.empty())
+                {
+                    commandline = L"cmd.exe";
+                }
+
+                // Wrap the commandline to print protocol credentials before launching.
+                // This helps developers grab WT_PIPE_NAME / WT_MCP_TOKEN from the pane.
+                auto wrappedCmd = fmt::format(
+                    L"cmd.exe /c \"echo WT_PIPE_NAME=%WT_PIPE_NAME% && echo WT_MCP_TOKEN=%WT_MCP_TOKEN% && {}\"",
+                    commandline);
+
+                NewTerminalArgs newTermArgs;
+                newTermArgs.Commandline(winrt::hstring{ wrappedCmd });
+
+                const auto profile = globals.AiCoordinatorProfile();
+                if (!profile.empty())
+                {
+                    newTermArgs.Profile(profile);
+                }
+
+                newTermArgs.TabTitle(L"AI Assistant");
+                newTermArgs.SuppressApplicationTitle(true);
+
+                InitializeCoordinator(newTermArgs);
             }
 
             const auto border = CoordinatorBorder();

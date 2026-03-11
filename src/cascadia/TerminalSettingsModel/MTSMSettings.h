@@ -75,7 +75,7 @@ Author(s):
     X(hstring, AgentCliPath, "agentCliPath", L"")                                                                                                                                                       \
     X(hstring, AgentPanePosition, "agentPanePosition", L"right")                                                                                                                                        \
     X(bool, AiCoordinatorEnabled, "aiIntegration.coordinator.enabled", true)                                                                                                                           \
-    X(hstring, AiCoordinatorCommandline, "aiIntegration.coordinator.commandline", L"")                                                                                                                  \
+    X(hstring, AiCoordinatorCommandline, "aiIntegration.coordinator.commandline", L"claude")                                                                                                                  \
     X(hstring, AiCoordinatorProfile, "aiIntegration.coordinator.profile", L"{fd19208a-412b-4857-8a2d-9ca592b4b16e}")                                                                                   \
     X(hstring, AiConfirmationReadOps, "aiIntegration.confirmation.readOperations", L"auto")                                                                                                             \
     X(hstring, AiConfirmationCreateOps, "aiIntegration.confirmation.createOperations", L"auto")                                                                                                         \

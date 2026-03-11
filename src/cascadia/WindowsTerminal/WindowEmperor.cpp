@@ -1503,6 +1503,12 @@ void WindowEmperor::_initializeProtocolServer()
 
     _protocolServer = std::make_unique<TerminalProtocolServer>(_protocolPipeName, _mcpToken, *_protocolHandler);
     _protocolServer->Start();
+
+    // Debug: print credentials so dev builds can manually set WT_PIPE_NAME / WT_MCP_TOKEN.
+    OutputDebugStringA(fmt::format("WT Protocol Server started\n  WT_PIPE_NAME={}\n  WT_MCP_TOKEN={}\n",
+                                   winrt::to_string(_protocolPipeName),
+                                   _mcpToken)
+                           .c_str());
 }
 
 void WindowEmperor::_startCoordinatorIfEnabled()
@@ -1648,8 +1654,15 @@ void WindowEmperor::_startCoordinatorIfEnabled()
         fullCommandline += mcpConfigPath.wstring();
     }
 
+    // Wrap the commandline to print protocol credentials in the pane before launching.
+    auto wrappedCommandline = fmt::format(
+        L"cmd.exe /c \"echo WT_PIPE_NAME={} && echo WT_MCP_TOKEN={} && {}\"",
+        _protocolPipeName,
+        winrt::to_hstring(_mcpToken),
+        fullCommandline);
+
     NewTerminalArgs newTermArgs;
-    newTermArgs.Commandline(winrt::hstring{ fullCommandline });
+    newTermArgs.Commandline(winrt::hstring{ wrappedCommandline });
 
     const auto profile = globals.AiCoordinatorProfile();
     if (!profile.empty())
