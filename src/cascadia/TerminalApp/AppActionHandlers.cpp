@@ -1648,4 +1648,32 @@ namespace winrt::TerminalApp::implementation
         ToggleCoordinator();
         args.Handled(true);
     }
+
+    void TerminalPage::_HandleShowProtocolInfo(const IInspectable& /*sender*/,
+                                               const ActionEventArgs& args)
+    {
+        // Compute pipe name from current PID (matches what WindowEmperor creates)
+        const auto pid = GetCurrentProcessId();
+        const auto pipeName = fmt::format(FMT_COMPILE(L"\\\\.\\pipe\\WindowsTerminal-{}"), pid);
+
+        // Reuse the WindowIdToast TeachingTip to display protocol info
+        if (_windowIdToast == nullptr)
+        {
+            if (auto tip{ FindName(L"WindowIdToast").try_as<MUX::Controls::TeachingTip>() })
+            {
+                _windowIdToast = std::make_shared<Toast>(tip);
+                tip.IsLightDismissEnabled(false);
+                tip.Closed({ get_weak(), &TerminalPage::_FocusActiveControl });
+            }
+        }
+        _UpdateTeachingTipTheme(WindowIdToast().try_as<winrt::Windows::UI::Xaml::FrameworkElement>());
+
+        if (_windowIdToast != nullptr)
+        {
+            WindowIdToast().Title(L"Terminal Protocol");
+            WindowIdToast().Subtitle(pipeName);
+            _windowIdToast->Open();
+        }
+        args.Handled(true);
+    }
 }

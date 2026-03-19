@@ -459,6 +459,9 @@
   <data name="ToggleCoordinatorCommandKey" xml:space="preserve">
     <value>Toggle AI assistant</value>
   </data>
+  <data name="ShowProtocolInfoCommandKey" xml:space="preserve">
+    <value>Show Terminal Protocol Info</value>
+  </data>
   <data name="SuggestionsCommandKey" xml:space="preserve">
     <value>Open suggestions</value>
   </data>

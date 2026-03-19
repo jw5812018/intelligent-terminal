@@ -502,6 +502,7 @@ namespace winrt::TerminalApp::implementation
 
         // Agent pane helpers
         winrt::hstring _DetectAgentCli() const;
+        winrt::hstring _DetectWtaPath() const;
         winrt::Microsoft::Terminal::Control::TermControl _FindAgentPaneControlInCurrentTab();
         std::shared_ptr<Pane> _CreateAcpAgentPane(const winrt::hstring& startingDirectory,
                                                    const winrt::hstring& agentCliPath,

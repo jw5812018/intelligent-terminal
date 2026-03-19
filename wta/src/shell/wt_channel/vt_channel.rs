@@ -1,23 +1,135 @@
-use serde::{Deserialize, Serialize};
+use std::io::{Read, Write};
+use std::sync::mpsc;
+use std::time::Duration;
 
-/// Pane identity discovered for the current wta instance.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PaneIdentity {
-    pub pane_id: String,
-    pub tab_id: String,
-    pub window_id: String,
+/// Connection info discovered via VT sequence or environment variables.
+#[derive(Debug, Clone)]
+pub struct ConnectionInfo {
+    pub pipe_name: String,
+    pub token: String,
+    pub source: DiscoverySource,
 }
 
-// --- VT-based identity discovery (Phase 2 - future) ---
-//
-// The full VT approach would:
-// 1. Write `\x1b]9001;WtaReq;{"method":"identify"}\x07` to stdout
-// 2. Read `\x1b]9001;WtaRes;{json}\x07` from stdin (before crossterm raw mode)
-// 3. Parse the PaneIdentity from the response JSON
-//
-// This requires:
-// - C++ DoWTAction handler returning pane_id/tab_id/window_id (ITerminalApi plumbing)
-// - Raw console mode stdin reading before crossterm takes over
-//
-// Currently, pane identity is discovered via PID matching over the named pipe
-// (see discover_pane_identity in main.rs).
+#[derive(Debug, Clone)]
+pub enum DiscoverySource {
+    /// Discovered via OSC 9001 VT escape sequence
+    VtOsc,
+    /// Read from WT_PIPE_NAME / WT_MCP_TOKEN environment variables
+    EnvVar,
+}
+
+/// Discover WT protocol connection info with fallback chain:
+/// 1. VT OSC 9001 discover sequence (works in any WT pane)
+/// 2. Environment variables WT_PIPE_NAME / WT_MCP_TOKEN (coordinator panes only)
+/// 3. None (not running inside Windows Terminal)
+pub fn discover_connection_info() -> Option<ConnectionInfo> {
+    // Try VT discovery first
+    if let Some(info) = try_vt_discover() {
+        return Some(info);
+    }
+
+    // Fall back to environment variables
+    if let Ok(pipe_name) = std::env::var("WT_PIPE_NAME") {
+        let token = std::env::var("WT_MCP_TOKEN").unwrap_or_default();
+        return Some(ConnectionInfo {
+            pipe_name,
+            token,
+            source: DiscoverySource::EnvVar,
+        });
+    }
+
+    None
+}
+
+/// Try to discover connection info via VT OSC 9001 escape sequence.
+///
+/// Sends `\x1b]9001;WtaReq;{"method":"discover"}\x07` to stdout,
+/// reads the response `\x1b]9001;WtaRes;{json}\x1b\\` from stdin,
+/// and parses pipe name + token from the JSON response.
+fn try_vt_discover() -> Option<ConnectionInfo> {
+    // Enable raw mode so we can read the terminal's response from stdin
+    crossterm::terminal::enable_raw_mode().ok()?;
+
+    let result = try_vt_discover_inner();
+
+    // Always restore normal mode
+    let _ = crossterm::terminal::disable_raw_mode();
+
+    result
+}
+
+fn try_vt_discover_inner() -> Option<ConnectionInfo> {
+    // Write the OSC discover request to stdout
+    let mut stdout = std::io::stdout();
+    stdout
+        .write_all(b"\x1b]9001;WtaReq;{\"method\":\"discover\"}\x07")
+        .ok()?;
+    stdout.flush().ok()?;
+
+    // Read response from stdin on a blocking thread with timeout.
+    // The response format is: \x1b]9001;WtaRes;{json}\x1b\\
+    let (tx, rx) = mpsc::channel::<Vec<u8>>();
+
+    std::thread::spawn(move || {
+        let mut stdin = std::io::stdin().lock();
+        let mut buf = Vec::with_capacity(512);
+        let mut byte = [0u8; 1];
+
+        // Read until we see the ST (String Terminator): \x1b\\
+        loop {
+            match stdin.read(&mut byte) {
+                Ok(1) => {
+                    buf.push(byte[0]);
+                    // Check for ST: last two bytes are \x1b and '\\'
+                    if buf.len() >= 2
+                        && buf[buf.len() - 2] == 0x1b
+                        && buf[buf.len() - 1] == b'\\'
+                    {
+                        let _ = tx.send(buf);
+                        return;
+                    }
+                    // Safety: bail if response is unreasonably long
+                    if buf.len() > 4096 {
+                        return;
+                    }
+                }
+                _ => return,
+            }
+        }
+    });
+
+    // Wait up to 2 seconds for the response
+    let raw = rx.recv_timeout(Duration::from_secs(2)).ok()?;
+
+    // Parse: find "WtaRes;" then extract JSON until ST
+    let raw_str = String::from_utf8_lossy(&raw);
+    let marker = "WtaRes;";
+    let json_start = raw_str.find(marker)? + marker.len();
+    // JSON ends before the final \x1b\\
+    let json_end = raw_str.len().checked_sub(2)?;
+    if json_start >= json_end {
+        return None;
+    }
+    let json_str = &raw_str[json_start..json_end];
+
+    // Parse the JSON response
+    let resp: serde_json::Value = serde_json::from_str(json_str).ok()?;
+
+    let status = resp.get("status")?.as_str()?;
+    if status != "ok" {
+        return None;
+    }
+
+    let pipe_name = resp.get("pipe")?.as_str()?.to_string();
+    let token = resp
+        .get("token")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    Some(ConnectionInfo {
+        pipe_name,
+        token,
+        source: DiscoverySource::VtOsc,
+    })
+}

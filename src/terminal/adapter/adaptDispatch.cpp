@@ -3802,20 +3802,27 @@ void AdaptDispatch::DoWTAction(const std::wstring_view string)
     {
         // WTA (Windows Terminal Agent) protocol request via VT escape sequence.
         // Format: \x1b]9001;WtaReq;{json}\x07
-        // Currently supports: {"method":"identify"} → returns acknowledgment.
+        // Supports: {"method":"discover"} → returns pipe name + token for protocol access.
         // The response is injected back as \x1b]9001;WtaRes;{json}\x1b\\ via stdin.
-        //
-        // NOTE: Full pane/tab/window identity requires plumbing ProtocolId
-        // through the ITerminalApi layer. For now, we return a simple ack
-        // so wta can detect that it's running inside WT with VT support.
         if (parts.size() >= 2)
         {
-            // parts[1] is the JSON payload
-            // For any request, return an ack with method echo
             const auto payload = til::at(parts, 1);
-            // Return response via OSC 9001
-            const auto response = fmt::format(FMT_COMPILE(L"9001;WtaRes;{{\"status\":\"ok\",\"vt_supported\":true}}"));
-            _ReturnOscResponse(response);
+
+            // Check if this is a "discover" request
+            if (payload.find(L"discover") != std::wstring_view::npos)
+            {
+                // Compute pipe name from current PID — matches what WindowEmperor creates.
+                const auto pid = GetCurrentProcessId();
+                const auto pipeName = fmt::format(FMT_COMPILE(L"\\\\\\\\.\\\\pipe\\\\WindowsTerminal-{}"), pid);
+                const auto response = fmt::format(FMT_COMPILE(L"9001;WtaRes;{{\"status\":\"ok\",\"pipe\":\"{}\",\"token\":\"\"}}"), pipeName);
+                _ReturnOscResponse(response);
+            }
+            else
+            {
+                // Default ack for other methods (e.g. "identify")
+                const auto response = fmt::format(FMT_COMPILE(L"9001;WtaRes;{{\"status\":\"ok\",\"vt_supported\":true}}"));
+                _ReturnOscResponse(response);
+            }
         }
     }
 }

@@ -2,12 +2,13 @@
 
 ## Overview
 
-WTA is a Rust application that provides dual-mode operation:
+WTA is a Rust application that provides three modes of operation:
 
 - **ACP mode** (default): TUI client that calls an agent subprocess via the Agent Client Protocol (ACP) over stdio
-- **MCP mode** (`--mcp`): Headless MCP server exposing shell tools for an external agent to call
+- **MCP mode** (`wta mcp`): Headless MCP server exposing shell tools for an external agent to call
+- **CLI mode** (subcommands): tmux-like commands (`wta list-panes`, `wta send-keys`, etc.) that talk directly to the WT pipe -- useful for humans and agents that can shell out
 
-Both modes share a common **ShellManager** shell integration layer. A planned **WtChannel** abstraction will enable bidirectional communication with Windows Terminal for tab/pane management and state queries.
+Both ACP and MCP modes share a common **ShellManager** shell integration layer. CLI subcommands are thin wrappers over `PipeChannel::request()` that don't need ShellManager. A **WtChannel** abstraction enables bidirectional communication with Windows Terminal for tab/pane management and state queries.
 
 ```
                   ┌──────────────────────────┐
@@ -44,7 +45,7 @@ Both modes share a common **ShellManager** shell integration layer. A planned **
 
 ```
 src/
-├── main.rs                         # CLI dispatch: --acp → TUI, --mcp → headless
+├── main.rs                         # CLI dispatch: subcommands, pipe discovery, TUI/MCP/CLI
 ├── app.rs                          # TUI app state + event loop (ACP mode only)
 ├── event.rs                        # Crossterm event reader
 ├── theme.rs                        # TUI theme constants
@@ -251,9 +252,27 @@ serde = { version = "1", features = ["derive"] }
 - [x] `wta --agent "copilot --acp --stdio"` — ACP TUI mode works
 - [x] `wta --mcp` — starts headless, responds to MCP tool discovery
 
-### Part 2 (Pending)
-- [ ] `cargo build` — compiles with new wt_channel module
-- [ ] `wta --wt --agent "copilot --acp --stdio"` — starts with VtChannel enabled
-- [ ] VtChannel writes OSC 9001 requests to stdout
-- [ ] Mock test: inject WtResponse, verify VtChannel resolves
+### Part 2 (Done)
+- [x] `cargo build` — compiles with wt_channel module
+- [x] VT OSC 9001 pipe discovery works
+- [x] PipeChannel named pipe transport works
+
+### Part 3: CLI Subcommands (Done)
+- [x] `cargo build` — compiles with all subcommands
+- [x] `wta list-windows` — prints windows table
+- [x] `wta list-tabs --json` — prints raw JSON
+- [x] `wta send-keys "echo hello" Enter` — sends to active pane
+- [x] `wta capture-pane -l 5` — prints last 5 lines from active pane
+- [x] `wta new-tab -c "pwsh" -n "Test"` — creates a new tab
+- [x] `wta split-pane -v` — splits active pane vertically
+- [x] `wta` (no args) — still launches ACP TUI mode
+- [x] `wta --mcp` — still works (backward compat)
+- [x] `wta pipe-id` — prints discovered pipe name
+- [x] `wta set-env` — prints eval-able export commands
+- [x] `wta --pipe-name <name> list-windows` — uses explicit pipe name
+- [x] `--pipe-name` propagates through to MCP config injection
+
+### Future
 - [ ] WT C++ side: build WT, verify DoWTAction receives WtaReq
+- [ ] `focus_pane` protocol method + `select-pane` subcommand
+- [ ] `rename-window`, `resize-pane`, `swap-pane` (need WT protocol support)

@@ -1559,8 +1559,9 @@ void WindowEmperor::_startCoordinatorIfEnabled()
 
     // Path to the MCP server executable shipped with Terminal.
     // TODO: In production, resolve this relative to the Terminal install directory.
+    // Using wta (Rust MCP server) debug build instead of C# WindowsTerminalMcpServer.
     static constexpr std::wstring_view mcpServerExe =
-        L"C:\\Users\\pabhojwa\\source\\repos\\terminal\\src\\cascadia\\WindowsTerminalMcpServer\\bin\\Debug\\net9.0\\win-x64\\WindowsTerminalMcpServer.exe";
+        L"C:\\Users\\xianghong\\Documents\\wta-unified\\wta\\target\\debug\\wta.exe";
 
     // The MCP config JSON for --additional-mcp-config (used by Copilot).
     // We store this in WT_MCP_CONFIG so the coordinator can pass it to delegates.
@@ -1572,7 +1573,7 @@ void WindowEmperor::_startCoordinatorIfEnabled()
     std::replace(pipeNameForJson.begin(), pipeNameForJson.end(), L'\\', L'/');
 
     const auto mcpConfigJson = fmt::format(
-        LR"json({{"mcpServers":{{"windows-terminal":{{"type":"stdio","command":"{}","args":[],"env":{{"WT_PIPE_NAME":"{}","WT_MCP_TOKEN":"{}"}}}}}}}})json",
+        LR"json({{"mcpServers":{{"windows-terminal":{{"type":"stdio","command":"{}","args":["--mcp"],"env":{{"WT_PIPE_NAME":"{}","WT_MCP_TOKEN":"{}"}}}}}}}})json",
         mcpServerExeForJson,
         pipeNameForJson,
         winrt::to_hstring(_mcpToken));

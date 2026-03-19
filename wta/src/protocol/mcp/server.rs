@@ -1,12 +1,30 @@
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{Implementation, ServerInfo};
+use rmcp::model::{Implementation, ServerCapabilities, ServerInfo};
 use rmcp::schemars;
 use rmcp::{tool, tool_handler, tool_router, ServerHandler, ServiceExt};
 use serde::Deserialize;
 use std::sync::Arc;
 
 use crate::shell::{ShellManager, TerminalConfig};
+
+/// Write a line to wta-mcp-debug.log (tool call tracing).
+fn mcp_log(msg: &str) {
+    use std::io::Write;
+    if std::env::var("WTA_DEBUG_LOG").as_deref() == Ok("0") {
+        return;
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("wta-mcp-debug.log")
+    {
+        let elapsed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let _ = writeln!(f, "[{:.3}] {}", elapsed.as_secs_f64(), msg);
+    }
+}
 
 #[derive(Clone)]
 pub struct WtaMcpServer {
@@ -111,6 +129,14 @@ impl WtaMcpServer {
     fn json_pretty(val: &serde_json::Value) -> String {
         serde_json::to_string_pretty(val).unwrap_or_else(|_| val.to_string())
     }
+
+    fn truncate(s: &str, max: usize) -> String {
+        if s.len() > max {
+            format!("{}...", &s[..max])
+        } else {
+            s.to_string()
+        }
+    }
 }
 
 #[tool_router]
@@ -120,6 +146,7 @@ impl WtaMcpServer {
     /// Run a command to completion and return its output.
     #[tool(description = "Run a command and return its output")]
     async fn run_command(&self, Parameters(params): Parameters<RunCommandParams>) -> String {
+        mcp_log(&format!(">>> run_command({:?}, args={:?}, cwd={:?})", params.command, params.args, params.cwd));
         let config = TerminalConfig {
             command: params.command,
             args: params.args,
@@ -129,22 +156,24 @@ impl WtaMcpServer {
 
         let id = match self.shell_mgr.create_terminal(config).await {
             Ok(id) => id,
-            Err(e) => return format!("Error creating terminal: {}", e),
+            Err(e) => { let r = format!("Error creating terminal: {}", e); mcp_log(&format!("<<< run_command: {}", r)); return r; }
         };
 
         let exit_code = match self.shell_mgr.wait_for_exit(&id).await {
             Ok(code) => code,
-            Err(e) => return format!("Error waiting for exit: {}", e),
+            Err(e) => { let r = format!("Error waiting for exit: {}", e); mcp_log(&format!("<<< run_command: {}", r)); return r; }
         };
 
         let output = match self.shell_mgr.get_output(&id).await {
             Ok(o) => o.data,
-            Err(e) => return format!("Error getting output: {}", e),
+            Err(e) => { let r = format!("Error getting output: {}", e); mcp_log(&format!("<<< run_command: {}", r)); return r; }
         };
 
         let _ = self.shell_mgr.release(&id).await;
 
-        format!("Exit code: {}\n\n{}", exit_code, output)
+        let result = format!("Exit code: {}\n\n{}", exit_code, output);
+        mcp_log(&format!("<<< run_command: exit_code={}, output_len={}", exit_code, output.len()));
+        result
     }
 
     /// Create a persistent terminal session and return its ID.
@@ -153,6 +182,7 @@ impl WtaMcpServer {
         &self,
         Parameters(params): Parameters<CreateTerminalParams>,
     ) -> String {
+        mcp_log(&format!(">>> create_terminal({:?}, args={:?}, cwd={:?})", params.command, params.args, params.cwd));
         let config = TerminalConfig {
             command: params.command,
             args: params.args,
@@ -160,10 +190,12 @@ impl WtaMcpServer {
             env: vec![],
         };
 
-        match self.shell_mgr.create_terminal(config).await {
+        let result = match self.shell_mgr.create_terminal(config).await {
             Ok(id) => format!("Terminal created: {}", id),
             Err(e) => format!("Error creating terminal: {}", e),
-        }
+        };
+        mcp_log(&format!("<<< create_terminal: {}", result));
+        result
     }
 
     /// Get buffered output from a terminal session.
@@ -172,7 +204,8 @@ impl WtaMcpServer {
         &self,
         Parameters(params): Parameters<TerminalIdParams>,
     ) -> String {
-        match self.shell_mgr.get_output(&params.terminal_id).await {
+        mcp_log(&format!(">>> get_terminal_output({})", params.terminal_id));
+        let result = match self.shell_mgr.get_output(&params.terminal_id).await {
             Ok(output) => {
                 let status = match output.exit_status {
                     Some(code) => format!(" (exited: {})", code),
@@ -181,7 +214,9 @@ impl WtaMcpServer {
                 format!("[{}{}]\n{}", params.terminal_id, status, output.data)
             }
             Err(e) => format!("Error: {}", e),
-        }
+        };
+        mcp_log(&format!("<<< get_terminal_output: {} bytes", result.len()));
+        result
     }
 
     /// Wait for a terminal to exit and return the exit code.
@@ -190,10 +225,13 @@ impl WtaMcpServer {
         &self,
         Parameters(params): Parameters<TerminalIdParams>,
     ) -> String {
-        match self.shell_mgr.wait_for_exit(&params.terminal_id).await {
+        mcp_log(&format!(">>> wait_for_terminal({})", params.terminal_id));
+        let result = match self.shell_mgr.wait_for_exit(&params.terminal_id).await {
             Ok(code) => format!("Terminal {} exited with code {}", params.terminal_id, code),
             Err(e) => format!("Error: {}", e),
-        }
+        };
+        mcp_log(&format!("<<< wait_for_terminal: {}", result));
+        result
     }
 
     /// Kill a terminal session.
@@ -202,10 +240,13 @@ impl WtaMcpServer {
         &self,
         Parameters(params): Parameters<TerminalIdParams>,
     ) -> String {
-        match self.shell_mgr.kill(&params.terminal_id).await {
+        mcp_log(&format!(">>> kill_terminal({})", params.terminal_id));
+        let result = match self.shell_mgr.kill(&params.terminal_id).await {
             Ok(()) => format!("Terminal {} killed", params.terminal_id),
             Err(e) => format!("Error: {}", e),
-        }
+        };
+        mcp_log(&format!("<<< kill_terminal: {}", result));
+        result
     }
 
     // ── Windows Terminal state tools ────────────────────────────────
@@ -213,37 +254,49 @@ impl WtaMcpServer {
     /// List all Windows Terminal windows. Returns window IDs, titles, and tab counts.
     #[tool(description = "List all Windows Terminal windows with their IDs and titles")]
     async fn wt_list_windows(&self) -> String {
-        match self.shell_mgr.wt_list_windows().await {
+        mcp_log(">>> wt_list_windows()");
+        let result = match self.shell_mgr.wt_list_windows().await {
             Ok(val) => Self::json_pretty(&val),
             Err(e) => format!("Error: {}", e),
-        }
+        };
+        mcp_log(&format!("<<< wt_list_windows: {}", Self::truncate(&result, 200)));
+        result
     }
 
     /// List all tabs in a Windows Terminal window.
     #[tool(description = "List all tabs in a Windows Terminal window. Use window_id from wt_list_windows.")]
     async fn wt_list_tabs(&self, Parameters(params): Parameters<WindowIdParams>) -> String {
-        match self.shell_mgr.wt_list_tabs(&params.window_id).await {
+        mcp_log(&format!(">>> wt_list_tabs(window_id={})", params.window_id));
+        let result = match self.shell_mgr.wt_list_tabs(&params.window_id).await {
             Ok(val) => Self::json_pretty(&val),
             Err(e) => format!("Error: {}", e),
-        }
+        };
+        mcp_log(&format!("<<< wt_list_tabs: {}", Self::truncate(&result, 200)));
+        result
     }
 
     /// List all panes in a tab.
     #[tool(description = "List all panes in a tab. Use tab_id from wt_list_tabs.")]
     async fn wt_list_panes(&self, Parameters(params): Parameters<TabIdParams>) -> String {
-        match self.shell_mgr.wt_list_panes(&params.tab_id).await {
+        mcp_log(&format!(">>> wt_list_panes(tab_id={})", params.tab_id));
+        let result = match self.shell_mgr.wt_list_panes(&params.tab_id).await {
             Ok(val) => Self::json_pretty(&val),
             Err(e) => format!("Error: {}", e),
-        }
+        };
+        mcp_log(&format!("<<< wt_list_panes: {}", Self::truncate(&result, 200)));
+        result
     }
 
     /// Get info about the currently active/focused pane.
     #[tool(description = "Get the currently active pane's ID and info")]
     async fn wt_get_active_pane(&self) -> String {
-        match self.shell_mgr.wt_get_active_pane().await {
+        mcp_log(">>> wt_get_active_pane()");
+        let result = match self.shell_mgr.wt_get_active_pane().await {
             Ok(val) => Self::json_pretty(&val),
             Err(e) => format!("Error: {}", e),
-        }
+        };
+        mcp_log(&format!("<<< wt_get_active_pane: {}", Self::truncate(&result, 200)));
+        result
     }
 
     /// Read recent output from a terminal pane.
@@ -252,14 +305,17 @@ impl WtaMcpServer {
         &self,
         Parameters(params): Parameters<ReadPaneOutputParams>,
     ) -> String {
-        match self
+        mcp_log(&format!(">>> wt_read_pane_output(pane_id={}, max_lines={:?})", params.pane_id, params.max_lines));
+        let result = match self
             .shell_mgr
             .wt_read_pane_output(&params.pane_id, params.max_lines)
             .await
         {
             Ok(val) => Self::json_pretty(&val),
             Err(e) => format!("Error: {}", e),
-        }
+        };
+        mcp_log(&format!("<<< wt_read_pane_output: {} bytes", result.len()));
+        result
     }
 
     /// Get the process status of a pane (running, exit code, etc.).
@@ -268,14 +324,17 @@ impl WtaMcpServer {
         &self,
         Parameters(params): Parameters<PaneIdParams>,
     ) -> String {
-        match self
+        mcp_log(&format!(">>> wt_get_process_status(pane_id={})", params.pane_id));
+        let result = match self
             .shell_mgr
             .wt_get_process_status(&params.pane_id)
             .await
         {
             Ok(val) => Self::json_pretty(&val),
             Err(e) => format!("Error: {}", e),
-        }
+        };
+        mcp_log(&format!("<<< wt_get_process_status: {}", Self::truncate(&result, 200)));
+        result
     }
 
     // ── Windows Terminal control tools ──────────────────────────────
@@ -283,7 +342,8 @@ impl WtaMcpServer {
     /// Create a new tab in Windows Terminal.
     #[tool(description = "Create a new tab in Windows Terminal. Returns the new pane's ID.")]
     async fn wt_create_tab(&self, Parameters(params): Parameters<CreateTabParams>) -> String {
-        match self
+        mcp_log(&format!(">>> wt_create_tab(cmd={:?}, cwd={:?}, title={:?})", params.commandline, params.cwd, params.title));
+        let result = match self
             .shell_mgr
             .wt_create_tab(
                 params.commandline.as_deref(),
@@ -294,13 +354,16 @@ impl WtaMcpServer {
         {
             Ok(val) => Self::json_pretty(&val),
             Err(e) => format!("Error: {}", e),
-        }
+        };
+        mcp_log(&format!("<<< wt_create_tab: {}", Self::truncate(&result, 200)));
+        result
     }
 
     /// Split an existing pane in Windows Terminal.
     #[tool(description = "Split a pane in Windows Terminal. Returns the new pane's ID.")]
     async fn wt_split_pane(&self, Parameters(params): Parameters<SplitPaneParams>) -> String {
-        match self
+        mcp_log(&format!(">>> wt_split_pane(pane_id={}, dir={:?}, size={:?})", params.pane_id, params.direction, params.size));
+        let result = match self
             .shell_mgr
             .wt_split_pane(
                 &params.pane_id,
@@ -312,29 +375,37 @@ impl WtaMcpServer {
         {
             Ok(val) => Self::json_pretty(&val),
             Err(e) => format!("Error: {}", e),
-        }
+        };
+        mcp_log(&format!("<<< wt_split_pane: {}", Self::truncate(&result, 200)));
+        result
     }
 
     /// Send text input to a terminal pane (keystrokes).
     #[tool(description = "Send text/keystrokes to a terminal pane. Use this to type commands into a pane.")]
     async fn wt_send_input(&self, Parameters(params): Parameters<SendInputParams>) -> String {
-        match self
+        mcp_log(&format!(">>> wt_send_input(pane_id={}, input={:?})", params.pane_id, Self::truncate(&params.input, 100)));
+        let result = match self
             .shell_mgr
             .wt_send_input(&params.pane_id, &params.input)
             .await
         {
             Ok(val) => Self::json_pretty(&val),
             Err(e) => format!("Error: {}", e),
-        }
+        };
+        mcp_log(&format!("<<< wt_send_input: {}", Self::truncate(&result, 200)));
+        result
     }
 
     /// Close a terminal pane.
     #[tool(description = "Close a terminal pane")]
     async fn wt_close_pane(&self, Parameters(params): Parameters<PaneIdParams>) -> String {
-        match self.shell_mgr.wt_close_pane(&params.pane_id).await {
+        mcp_log(&format!(">>> wt_close_pane(pane_id={})", params.pane_id));
+        let result = match self.shell_mgr.wt_close_pane(&params.pane_id).await {
             Ok(val) => Self::json_pretty(&val),
             Err(e) => format!("Error: {}", e),
-        }
+        };
+        mcp_log(&format!("<<< wt_close_pane: {}", Self::truncate(&result, 200)));
+        result
     }
 }
 
@@ -342,6 +413,7 @@ impl WtaMcpServer {
 impl ServerHandler for WtaMcpServer {
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::default();
+        info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info.server_info = Implementation::from_build_env();
         info.instructions = Some(
             "WTA (Windows Terminal Agent) — provides shell tools and Windows Terminal integration. \
@@ -357,6 +429,8 @@ impl ServerHandler for WtaMcpServer {
 
 /// Run WTA as a headless MCP server over stdio.
 pub async fn run_mcp_server(shell_mgr: Arc<ShellManager>) -> anyhow::Result<()> {
+    mcp_log("=== MCP server starting ===");
+    mcp_log(&format!("WT_PIPE_NAME={:?}", std::env::var("WT_PIPE_NAME").ok()));
     let server = WtaMcpServer::new(shell_mgr);
 
     let service = server

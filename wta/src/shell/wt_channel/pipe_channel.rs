@@ -34,8 +34,14 @@ impl PipeChannel {
         // Token is optional for dev — empty string triggers the dev bypass in WT.
         let token = std::env::var("WT_MCP_TOKEN").unwrap_or_default();
 
+        Self::connect_with(&pipe_name, &token).await
+    }
+
+    /// Connect to a specific pipe with an explicit name and token.
+    /// This avoids needing environment variables (e.g. after VT discovery).
+    pub async fn connect_with(pipe_name: &str, token: &str) -> anyhow::Result<Self> {
         let pipe = ClientOptions::new()
-            .open(&pipe_name)
+            .open(pipe_name)
             .context(format!("Failed to connect to pipe: {}", pipe_name))?;
 
         // Debug log is ON by default. Set WTA_DEBUG_LOG=0 to disable.

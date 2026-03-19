@@ -671,7 +671,9 @@ namespace winrt::TerminalApp::implementation
 
     // Method Description:
     // - Auto-detects an installed agent CLI by searching the system PATH.
-    //   Checks for known CLIs in priority order: claude, copilot.
+    //   Checks for known CLIs in priority order: copilot, claude.
+    //   NOTE: This is used by the AcpConnection path (_CreateAcpAgentPane).
+    //   The command palette agent path now uses WTA instead — see _DetectWtaPath.
     // Arguments:
     // - <none>
     // Return Value:
@@ -695,6 +697,25 @@ namespace winrt::TerminalApp::implementation
             {
                 return winrt::hstring{ cli };
             }
+        }
+        return winrt::hstring{};
+    }
+
+    // Method Description:
+    // - Auto-detects the WTA (Windows Terminal Agent) executable by searching
+    //   the system PATH. WTA is the preferred way to launch agents because it
+    //   handles MCP config injection, giving agents access to Windows Terminal
+    //   MCP tools (pane management, send-keys, etc.).
+    // Arguments:
+    // - <none>
+    // Return Value:
+    // - The full path to wta.exe, or empty string if not found.
+    winrt::hstring TerminalPage::_DetectWtaPath() const
+    {
+        wchar_t buffer[MAX_PATH];
+        if (SearchPathW(nullptr, L"wta", L".exe", MAX_PATH, buffer, nullptr) > 0)
+        {
+            return winrt::hstring{ buffer };
         }
         return winrt::hstring{};
     }
@@ -751,6 +772,11 @@ namespace winrt::TerminalApp::implementation
 
     // Method Description:
     // - Creates a new pane running an ACP agent connection.
+    //   NOTE: This is no longer used by the command palette agent path.
+    //   The command palette now launches WTA via a normal ConPTY pane (see
+    //   _OpenOrReuseAgentPane), which gives the agent access to Windows
+    //   Terminal MCP tools. This method is retained for other callers that
+    //   may still create AcpConnection-based panes directly.
     // Arguments:
     // - startingDirectory - the working directory (passed as cwd in session/new)
     // - agentCliPath - path or name of the ACP agent executable
@@ -788,19 +814,13 @@ namespace winrt::TerminalApp::implementation
         OutputDebugStringW(fmt::format(FMT_COMPILE(L"[AgentPane] _OpenOrReuseAgentPane called, prompt='{}'\n"),
                                        std::wstring_view{ prompt }).c_str());
 
-        // 1. Resolve agent CLI path: setting > auto-detect
-        auto agentCliPath = _settings.GlobalSettings().AgentCliPath();
-        OutputDebugStringW(fmt::format(FMT_COMPILE(L"[AgentPane] agentCliPath from settings: '{}'\n"),
-                                       std::wstring_view{ agentCliPath }).c_str());
-        if (agentCliPath.empty())
+        // 1. Detect WTA. WTA is the preferred launcher because it auto-injects
+        //    MCP config, giving the agent access to Windows Terminal MCP tools
+        //    (pane management, send-keys, capture-pane, etc.).
+        auto wtaPath = _DetectWtaPath();
+        if (wtaPath.empty())
         {
-            agentCliPath = _DetectAgentCli();
-            OutputDebugStringW(fmt::format(FMT_COMPILE(L"[AgentPane] agentCliPath auto-detected: '{}'\n"),
-                                           std::wstring_view{ agentCliPath }).c_str());
-        }
-        if (agentCliPath.empty())
-        {
-            OutputDebugStringW(L"[AgentPane] No agent CLI found on PATH\n");
+            OutputDebugStringW(L"[AgentPane] wta.exe not found on PATH\n");
             return;
         }
 
@@ -839,12 +859,51 @@ namespace winrt::TerminalApp::implementation
             }
         }
 
-        OutputDebugStringW(fmt::format(FMT_COMPILE(L"[AgentPane] CWD='{}', CLI='{}'\n"),
-                                       std::wstring_view{ startingDirectory },
-                                       std::wstring_view{ agentCliPath }).c_str());
+        // 4. Build the WTA command line. We launch WTA as a normal ConPTY
+        //    process so it gets full terminal I/O and can auto-discover the WT
+        //    pipe via VT OSC 9001.
+        //
+        //    Format: wta.exe [--agent "cli"] ["prompt"]
+        //
+        //    Prompt escaping: embedded double-quotes are doubled ("") per
+        //    Windows command-line quoting convention.
+        std::wstring cmdline{ wtaPath };
 
-        // 4. Create new ACP agent pane
-        auto newPane = _CreateAcpAgentPane(startingDirectory, agentCliPath, prompt);
+        // If the user has a custom agent CLI configured, pass it through.
+        auto agentCliPath = _settings.GlobalSettings().AgentCliPath();
+        if (!agentCliPath.empty())
+        {
+            std::wstring agentStr{ agentCliPath };
+            for (size_t pos = 0; (pos = agentStr.find(L'"', pos)) != std::wstring::npos; pos += 2)
+            {
+                agentStr.replace(pos, 1, L"\"\"");
+            }
+            cmdline += fmt::format(FMT_COMPILE(L" --agent \"{}\""), agentStr);
+        }
+
+        if (!prompt.empty())
+        {
+            std::wstring escapedPrompt{ prompt };
+            for (size_t pos = 0; (pos = escapedPrompt.find(L'"', pos)) != std::wstring::npos; pos += 2)
+            {
+                escapedPrompt.replace(pos, 1, L"\"\"");
+            }
+            cmdline += fmt::format(FMT_COMPILE(L" \"{}\""), escapedPrompt);
+        }
+
+        OutputDebugStringW(fmt::format(FMT_COMPILE(L"[AgentPane] CWD='{}', cmd='{}'\n"),
+                                       std::wstring_view{ startingDirectory },
+                                       cmdline).c_str());
+
+        // 5. Create a normal ConPTY pane running WTA via NewTerminalArgs.
+        NewTerminalArgs newTerminalArgs;
+        newTerminalArgs.Commandline(winrt::hstring{ cmdline });
+        if (!startingDirectory.empty())
+        {
+            newTerminalArgs.StartingDirectory(startingDirectory);
+        }
+
+        auto newPane = _MakeTerminalPane(newTerminalArgs, nullptr, nullptr);
         if (!newPane)
         {
             return;
@@ -852,7 +911,7 @@ namespace winrt::TerminalApp::implementation
 
         _agentPanes.push_back(newPane);
 
-        // 5. Split the active tab with the agent pane
+        // 6. Split the active tab with the agent pane
         const auto& activeTab = _GetFocusedTabImpl();
         const auto positionSetting = _settings.GlobalSettings().AgentPanePosition();
         const auto splitDirection = (positionSetting == L"bottom")
@@ -3826,7 +3885,11 @@ namespace winrt::TerminalApp::implementation
         TerminalConnection::ITerminalConnection connection{ nullptr };
         if (newTerminalArgs && newTerminalArgs.IsAcpAgent())
         {
-            // Create an AcpConnection instead of ConPTY when --agent is specified
+            // Create an AcpConnection instead of ConPTY when --agent is specified.
+            // NOTE: The command palette agent path no longer uses this branch.
+            // It now launches WTA via a normal ConPTY pane (see _OpenOrReuseAgentPane)
+            // which provides MCP tool access. This branch is still used by callers
+            // that set IsAcpAgent directly (e.g. CLI startup actions).
             auto agentCliPath = _settings.GlobalSettings().AgentCliPath();
             if (agentCliPath.empty())
             {
