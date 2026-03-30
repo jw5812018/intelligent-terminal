@@ -1,6 +1,10 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 #pragma once
 
 #include "Channel.h"
+
 #include <wrl/client.h>
 
 // COM-based channel that calls ITerminalProtocolServer methods directly.

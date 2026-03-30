@@ -1,18 +1,19 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 #pragma once
+
+#include "ITerminalProtocolServer.h"
+
+#include <Windows.h>
+#include <objbase.h>
 
 #include <memory>
 #include <string>
 #include <vector>
 
-#include <Windows.h>
-#include <objbase.h>
-#include "ITerminalProtocolServer.h"
-
 // Abstract channel interface for communicating with Windows Terminal.
-// Equivalent to Rust's WtChannel trait.
-//
 // COM channel implements methods directly via typed COM calls.
-// Pipe channel implements via JSON wire protocol as a fallback.
 struct Channel
 {
     virtual ~Channel() = default;
@@ -49,64 +50,57 @@ struct Channel
     static std::unique_ptr<Channel> Connect();
 };
 
-// Helper: free all BSTRs in a PROTOCOL_WINDOW_INFO and zero the struct.
-inline void FreeWindowInfo(PROTOCOL_WINDOW_INFO& info)
+// Helper: free all BSTRs in a PROTOCOL_WINDOW_INFO.
+inline void FreeWindowInfo(PROTOCOL_WINDOW_INFO& info) noexcept
 {
     SysFreeString(info.WindowId);
     SysFreeString(info.Title);
-    memset(&info, 0, sizeof(info));
 }
 
-inline void FreeTabInfo(PROTOCOL_TAB_INFO& info)
+inline void FreeTabInfo(PROTOCOL_TAB_INFO& info) noexcept
 {
     SysFreeString(info.TabId);
     SysFreeString(info.WindowId);
     SysFreeString(info.Title);
-    memset(&info, 0, sizeof(info));
 }
 
-inline void FreePaneInfo(PROTOCOL_PANE_INFO& info)
+inline void FreePaneInfo(PROTOCOL_PANE_INFO& info) noexcept
 {
     SysFreeString(info.PaneId);
     SysFreeString(info.TabId);
     SysFreeString(info.WindowId);
     SysFreeString(info.Title);
     SysFreeString(info.Profile);
-    memset(&info, 0, sizeof(info));
 }
 
-inline void FreePaneOutput(PROTOCOL_PANE_OUTPUT& info)
+inline void FreePaneOutput(PROTOCOL_PANE_OUTPUT& info) noexcept
 {
     SysFreeString(info.PaneId);
     SysFreeString(info.Content);
-    memset(&info, 0, sizeof(info));
 }
 
-inline void FreeProcessStatus(PROTOCOL_PROCESS_STATUS& info)
+inline void FreeProcessStatus(PROTOCOL_PROCESS_STATUS& info) noexcept
 {
     SysFreeString(info.PaneId);
     SysFreeString(info.State);
-    memset(&info, 0, sizeof(info));
 }
 
-inline void FreeSessionVariable(PROTOCOL_SESSION_VARIABLE& info)
+inline void FreeSessionVariable(PROTOCOL_SESSION_VARIABLE& info) noexcept
 {
     SysFreeString(info.PaneId);
     SysFreeString(info.Name);
     SysFreeString(info.Value);
-    memset(&info, 0, sizeof(info));
 }
 
-inline void FreeTabCreationResult(PROTOCOL_TAB_CREATION_RESULT& info)
+inline void FreeTabCreationResult(PROTOCOL_TAB_CREATION_RESULT& info) noexcept
 {
     SysFreeString(info.TabId);
     SysFreeString(info.PaneId);
     SysFreeString(info.WindowId);
-    memset(&info, 0, sizeof(info));
 }
 
 // Helper: convert BSTR to std::wstring (null-safe).
-inline std::wstring BstrToWstring(BSTR bstr)
+inline std::wstring BstrToWstring(BSTR bstr) noexcept
 {
     return bstr ? std::wstring(bstr, SysStringLen(bstr)) : std::wstring{};
 }

@@ -1,14 +1,20 @@
-#include <Windows.h>
-#include <objbase.h>
-#include <CLI/CLI.hpp>
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
 
 #include "Channel.h"
 #include "ComChannel.h"
 #include "Formatting.h"
-#include <string>
-#include <cstdio>
-#include <thread>
+
+#include <Windows.h>
+#include <objbase.h>
+#include <wil/com.h>
+
+#include <CLI/CLI.hpp>
+
 #include <chrono>
+#include <cstdio>
+#include <string>
+#include <thread>
 
 // ── Helpers ──
 
@@ -93,27 +99,31 @@ static std::wstring TranslateKeys(const std::vector<std::string>& keys)
 
 int main()
 {
-    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    auto coInit = wil::CoInitializeEx(COINIT_MULTITHREADED);
 
     CLI::App app{ "wtcli — Windows Terminal CLI" };
     app.require_subcommand(0, 1);
 
     // Global options
     bool jsonMode = false;
+    int exitCode = 0;
     app.add_flag("--json", jsonMode, "Output raw JSON");
 
     // Helper: connect to Windows Terminal via COM
     auto connect = [&]() -> std::unique_ptr<Channel> {
-        return Channel::Connect();
+        auto ch = Channel::Connect();
+        if (!ch)
+            exitCode = 1;
+        return ch;
     };
 
     // ── list-windows ──
     auto* listWindowsCmd = app.add_subcommand("list-windows", "List all windows")->alias("lsw");
     listWindowsCmd->callback([&]() {
         auto ch = connect();
-        if (!ch) exit(1);
+        if (!ch) return;
         std::vector<PROTOCOL_WINDOW_INFO> windows;
-        if (FAILED(ch->ListWindows(windows))) { fprintf(stderr, "ListWindows failed\n"); exit(1); }
+        if (FAILED(ch->ListWindows(windows))) { fprintf(stderr, "ListWindows failed\n"); exitCode = 1; return; }
         if (jsonMode)
         {
             Json::Value arr(Json::objectValue);
@@ -135,10 +145,10 @@ int main()
     listTabsCmd->add_option("-w,--window-id", listTabsWindowId, "Window ID");
     listTabsCmd->callback([&]() {
         auto ch = connect();
-        if (!ch) exit(1);
+        if (!ch) return;
         auto wid = listTabsWindowId.empty() ? GetFirstWindowId(*ch) : Utf8ToWide(listTabsWindowId);
         std::vector<PROTOCOL_TAB_INFO> tabs;
-        if (FAILED(ch->ListTabs(wid, tabs))) { fprintf(stderr, "ListTabs failed\n"); exit(1); }
+        if (FAILED(ch->ListTabs(wid, tabs))) { fprintf(stderr, "ListTabs failed\n"); exitCode = 1; return; }
         if (jsonMode)
         {
             Json::Value arr(Json::objectValue);
@@ -161,7 +171,7 @@ int main()
     listPanesCmd->add_option("-w,--window-id", listPanesWindowId, "Window ID");
     listPanesCmd->callback([&]() {
         auto ch = connect();
-        if (!ch) exit(1);
+        if (!ch) return;
         auto wid = Utf8ToWide(listPanesWindowId);
         auto tid = Utf8ToWide(listPanesTabId);
         if (tid.empty())
@@ -170,7 +180,7 @@ int main()
             tid = GetFirstTabId(*ch, wid);
         }
         std::vector<PROTOCOL_PANE_INFO> panes;
-        if (FAILED(ch->ListPanes(wid, tid, panes))) { fprintf(stderr, "ListPanes failed\n"); exit(1); }
+        if (FAILED(ch->ListPanes(wid, tid, panes))) { fprintf(stderr, "ListPanes failed\n"); exitCode = 1; return; }
         if (jsonMode)
         {
             Json::Value arr(Json::objectValue);
@@ -190,9 +200,9 @@ int main()
     auto* activePaneCmd = app.add_subcommand("active-pane", "Show the currently active pane");
     activePaneCmd->callback([&]() {
         auto ch = connect();
-        if (!ch) exit(1);
+        if (!ch) return;
         PROTOCOL_PANE_INFO info{};
-        if (FAILED(ch->GetActivePane(info))) { fprintf(stderr, "GetActivePane failed\n"); exit(1); }
+        if (FAILED(ch->GetActivePane(info))) { fprintf(stderr, "GetActivePane failed\n"); exitCode = 1; return; }
         if (jsonMode)
             PrintJson(PaneInfoToJson(info));
         else
@@ -208,13 +218,14 @@ int main()
     capturePaneCmd->add_option("-l,--max-lines", captureMaxLines, "Max lines");
     capturePaneCmd->callback([&]() {
         auto ch = connect();
-        if (!ch) exit(1);
+        if (!ch) return;
         auto paneId = ResolvePaneId(*ch, capturePaneTarget);
         PROTOCOL_PANE_OUTPUT output{};
         if (FAILED(ch->ReadPaneOutput(paneId, L"scrollback", captureMaxLines, output)))
         {
             fprintf(stderr, "ReadPaneOutput failed\n");
-            exit(1);
+            exitCode = 1;
+            return;
         }
         if (jsonMode)
         {
@@ -234,10 +245,10 @@ int main()
     paneStatusCmd->add_option("-t,--target", paneStatusTarget, "Pane ID");
     paneStatusCmd->callback([&]() {
         auto ch = connect();
-        if (!ch) exit(1);
+        if (!ch) return;
         auto paneId = ResolvePaneId(*ch, paneStatusTarget);
         PROTOCOL_PROCESS_STATUS status{};
-        if (FAILED(ch->GetProcessStatus(paneId, status))) { fprintf(stderr, "GetProcessStatus failed\n"); exit(1); }
+        if (FAILED(ch->GetProcessStatus(paneId, status))) { fprintf(stderr, "GetProcessStatus failed\n"); exitCode = 1; return; }
         if (jsonMode)
         {
             Json::Value v;
@@ -262,10 +273,10 @@ int main()
     sendKeysCmd->add_option("keys", sendKeysArgs, "Keys to send")->required();
     sendKeysCmd->callback([&]() {
         auto ch = connect();
-        if (!ch) exit(1);
+        if (!ch) return;
         auto paneId = ResolvePaneId(*ch, sendKeysTarget);
         auto text = TranslateKeys(sendKeysArgs);
-        if (FAILED(ch->SendInput(paneId, text))) { fprintf(stderr, "SendInput failed\n"); exit(1); }
+        if (FAILED(ch->SendInput(paneId, text))) { fprintf(stderr, "SendInput failed\n"); exitCode = 1; return; }
     });
 
     // ── new-tab ──
@@ -275,13 +286,14 @@ int main()
     newTabCmd->add_option("-n,--title", newTabTitle, "Tab title");
     newTabCmd->callback([&]() {
         auto ch = connect();
-        if (!ch) exit(1);
+        if (!ch) return;
         PROTOCOL_TAB_CREATION_RESULT result{};
         if (FAILED(ch->CreateTab(L"", L"", Utf8ToWide(newTabCommand), Utf8ToWide(newTabTitle),
                                   false, false, true, result)))
         {
             fprintf(stderr, "CreateTab failed\n");
-            exit(1);
+            exitCode = 1;
+            return;
         }
         if (jsonMode)
             PrintJson(CreationResultToJson(result));
@@ -302,7 +314,7 @@ int main()
     splitPaneCmd->add_option("-c,--command", splitPaneCommand, "Command to run");
     splitPaneCmd->callback([&]() {
         auto ch = connect();
-        if (!ch) exit(1);
+        if (!ch) return;
         auto paneId = ResolvePaneId(*ch, splitPaneTarget);
         std::wstring dir = splitHorizontal ? L"horizontal" : (splitVertical ? L"vertical" : L"automatic");
         PROTOCOL_TAB_CREATION_RESULT result{};
@@ -310,7 +322,8 @@ int main()
                                   L"", Utf8ToWide(splitPaneCommand), false, true, result)))
         {
             fprintf(stderr, "SplitPane failed\n");
-            exit(1);
+            exitCode = 1;
+            return;
         }
         if (jsonMode)
             PrintJson(CreationResultToJson(result));
@@ -325,9 +338,9 @@ int main()
     killPaneCmd->add_option("-t,--target", killPaneTarget, "Pane ID");
     killPaneCmd->callback([&]() {
         auto ch = connect();
-        if (!ch) exit(1);
+        if (!ch) return;
         auto paneId = ResolvePaneId(*ch, killPaneTarget);
-        if (FAILED(ch->ClosePane(paneId))) { fprintf(stderr, "ClosePane failed\n"); exit(1); }
+        if (FAILED(ch->ClosePane(paneId))) { fprintf(stderr, "ClosePane failed\n"); exitCode = 1; return; }
         if (!jsonMode) printf("Pane %s closed.\n", WideToUtf8(paneId).c_str());
     });
 
@@ -336,7 +349,7 @@ int main()
     testPipeCmd->callback([&]() {
         printf("Connecting to Windows Terminal...\n");
         auto ch = connect();
-        if (!ch) { fprintf(stderr, "Connection failed.\n"); exit(1); }
+        if (!ch) { fprintf(stderr, "Connection failed.\n"); return; }
         printf("Connected and authenticated!\n\n");
 
         std::vector<PROTOCOL_WINDOW_INFO> windows;
@@ -418,14 +431,14 @@ int main()
     waitForCmd->add_option("--timeout", waitTimeout, "Timeout (seconds, 0=forever)");
     waitForCmd->callback([&]() {
         auto ch = connect();
-        if (!ch) exit(1);
+        if (!ch) return;
         auto paneId = Utf8ToWide(waitForTarget);
         auto start = std::chrono::steady_clock::now();
 
         while (true)
         {
             PROTOCOL_PROCESS_STATUS status{};
-            if (FAILED(ch->GetProcessStatus(paneId, status))) { fprintf(stderr, "GetProcessStatus failed\n"); exit(1); }
+            if (FAILED(ch->GetProcessStatus(paneId, status))) { fprintf(stderr, "GetProcessStatus failed\n"); exitCode = 1; return; }
 
             auto state = WideToUtf8(BstrToWstring(status.State));
             if (state == "exited")
@@ -456,7 +469,8 @@ int main()
                 if (elapsed >= waitTimeout)
                 {
                     fprintf(stderr, "Timeout waiting for pane %s\n", waitForTarget.c_str());
-                    exit(1);
+                    exitCode = 1;
+                    return;
                 }
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(waitInterval));
@@ -472,7 +486,7 @@ int main()
         else
         {
             fprintf(stderr, "WT_PIPE_NAME not set.\n");
-            exit(1);
+            exitCode = 1;
         }
     });
 
@@ -522,6 +536,5 @@ int main()
 
     CLI11_PARSE(app, __argc, __argv);
 
-    CoUninitialize();
-    return 0;
+    return exitCode;
 }

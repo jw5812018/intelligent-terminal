@@ -1,22 +1,16 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 #include "ComChannel.h"
 
 #include <combaseapi.h>
-#include <fmt/format.h>
+#include <wil/resource.h>
 
-// Helper: convert wstring to BSTR for [in] params. Returns null for empty.
-static BSTR ToBstr(const std::wstring& s)
+// Helper: convert wstring to wil::unique_bstr for [in] params.
+static wil::unique_bstr ToBstr(const std::wstring& s)
 {
-    return s.empty() ? nullptr : SysAllocString(s.c_str());
+    return wil::unique_bstr{ SysAllocString(s.c_str()) };
 }
-
-// RAII wrapper to free a BSTR on scope exit.
-struct BstrGuard
-{
-    BSTR bstr;
-    BstrGuard(BSTR b) : bstr(b) {}
-    ~BstrGuard() { SysFreeString(bstr); }
-    operator BSTR() const { return bstr; }
-};
 
 std::unique_ptr<ComChannel> ComChannel::Connect(const std::wstring& clsidStr, const std::wstring& token)
 {
@@ -54,38 +48,34 @@ std::unique_ptr<ComChannel> ComChannel::Connect(const std::wstring& clsidStr, co
 
 HRESULT ComChannel::Authenticate(const std::wstring& token, bool& authenticated, std::wstring& protocolVersion)
 {
-    BstrGuard bstrToken(ToBstr(token));
+    auto bstrToken = ToBstr(token);
     BOOL auth = FALSE;
-    BSTR version = nullptr;
+    wil::unique_bstr version;
 
-    HRESULT hr = _server->Authenticate(bstrToken, &auth, &version);
+    HRESULT hr = _server->Authenticate(bstrToken.get(), &auth, &version);
     if (SUCCEEDED(hr))
     {
         authenticated = (auth != FALSE);
-        protocolVersion = BstrToWstring(version);
-        SysFreeString(version);
+        protocolVersion = BstrToWstring(version.get());
     }
     return hr;
 }
 
 HRESULT ComChannel::GetCapabilities(std::wstring& protocolVersion, std::wstring& supportedMethodsJson)
 {
-    BSTR ver = nullptr;
-    BSTR methods = nullptr;
+    wil::unique_bstr ver;
+    wil::unique_bstr methods;
     HRESULT hr = _server->GetCapabilities(&ver, &methods);
     if (SUCCEEDED(hr))
     {
-        protocolVersion = BstrToWstring(ver);
-        supportedMethodsJson = BstrToWstring(methods);
-        SysFreeString(ver);
-        SysFreeString(methods);
+        protocolVersion = BstrToWstring(ver.get());
+        supportedMethodsJson = BstrToWstring(methods.get());
     }
     return hr;
 }
 
 HRESULT ComChannel::GetActivePane(PROTOCOL_PANE_INFO& result)
 {
-    memset(&result, 0, sizeof(result));
     return _server->GetActivePane(&result);
 }
 
@@ -104,10 +94,10 @@ HRESULT ComChannel::ListWindows(std::vector<PROTOCOL_WINDOW_INFO>& results)
 
 HRESULT ComChannel::ListTabs(const std::wstring& windowIdFilter, std::vector<PROTOCOL_TAB_INFO>& results)
 {
-    BstrGuard filter(ToBstr(windowIdFilter));
+    auto filter = ToBstr(windowIdFilter);
     UINT32 count = 0;
     PROTOCOL_TAB_INFO* raw = nullptr;
-    HRESULT hr = _server->ListTabs(filter, &count, &raw);
+    HRESULT hr = _server->ListTabs(filter.get(), &count, &raw);
     if (SUCCEEDED(hr) && raw)
     {
         results.assign(raw, raw + count);
@@ -118,11 +108,11 @@ HRESULT ComChannel::ListTabs(const std::wstring& windowIdFilter, std::vector<PRO
 
 HRESULT ComChannel::ListPanes(const std::wstring& windowIdFilter, const std::wstring& tabIdFilter, std::vector<PROTOCOL_PANE_INFO>& results)
 {
-    BstrGuard wf(ToBstr(windowIdFilter));
-    BstrGuard tf(ToBstr(tabIdFilter));
+    auto wf = ToBstr(windowIdFilter);
+    auto tf = ToBstr(tabIdFilter);
     UINT32 count = 0;
     PROTOCOL_PANE_INFO* raw = nullptr;
-    HRESULT hr = _server->ListPanes(wf, tf, &count, &raw);
+    HRESULT hr = _server->ListPanes(wf.get(), tf.get(), &count, &raw);
     if (SUCCEEDED(hr) && raw)
     {
         results.assign(raw, raw + count);
@@ -133,35 +123,31 @@ HRESULT ComChannel::ListPanes(const std::wstring& windowIdFilter, const std::wst
 
 HRESULT ComChannel::ReadPaneOutput(const std::wstring& paneId, const std::wstring& source, int maxLines, PROTOCOL_PANE_OUTPUT& result)
 {
-    BstrGuard pid(ToBstr(paneId));
-    BstrGuard src(ToBstr(source));
-    memset(&result, 0, sizeof(result));
-    return _server->ReadPaneOutput(pid, src, maxLines, &result);
+    auto pid = ToBstr(paneId);
+    auto src = ToBstr(source);
+    return _server->ReadPaneOutput(pid.get(), src.get(), maxLines, &result);
 }
 
 HRESULT ComChannel::GetProcessStatus(const std::wstring& paneId, PROTOCOL_PROCESS_STATUS& result)
 {
-    BstrGuard pid(ToBstr(paneId));
-    memset(&result, 0, sizeof(result));
-    return _server->GetProcessStatus(pid, &result);
+    auto pid = ToBstr(paneId);
+    return _server->GetProcessStatus(pid.get(), &result);
 }
 
 HRESULT ComChannel::GetSessionVariable(const std::wstring& paneId, const std::wstring& name, PROTOCOL_SESSION_VARIABLE& result)
 {
-    BstrGuard pid(ToBstr(paneId));
-    BstrGuard n(ToBstr(name));
-    memset(&result, 0, sizeof(result));
-    return _server->GetSessionVariable(pid, n, &result);
+    auto pid = ToBstr(paneId);
+    auto n = ToBstr(name);
+    return _server->GetSessionVariable(pid.get(), n.get(), &result);
 }
 
 HRESULT ComChannel::GetSettings(std::wstring& settingsJson)
 {
-    BSTR json = nullptr;
+    wil::unique_bstr json;
     HRESULT hr = _server->GetSettings(&json);
     if (SUCCEEDED(hr))
     {
-        settingsJson = BstrToWstring(json);
-        SysFreeString(json);
+        settingsJson = BstrToWstring(json.get());
     }
     return hr;
 }
@@ -171,12 +157,11 @@ HRESULT ComChannel::CreateTab(const std::wstring& windowId, const std::wstring& 
                                bool suppressAppTitle, bool injectMcpCredentials, bool background,
                                PROTOCOL_TAB_CREATION_RESULT& result)
 {
-    BstrGuard wid(ToBstr(windowId));
-    BstrGuard prof(ToBstr(profile));
-    BstrGuard cmd(ToBstr(commandline));
-    BstrGuard ttl(ToBstr(title));
-    memset(&result, 0, sizeof(result));
-    return _server->CreateTab(wid, prof, cmd, ttl,
+    auto wid = ToBstr(windowId);
+    auto prof = ToBstr(profile);
+    auto cmd = ToBstr(commandline);
+    auto ttl = ToBstr(title);
+    return _server->CreateTab(wid.get(), prof.get(), cmd.get(), ttl.get(),
                               suppressAppTitle ? TRUE : FALSE,
                               injectMcpCredentials ? TRUE : FALSE,
                               background ? TRUE : FALSE,
@@ -188,12 +173,11 @@ HRESULT ComChannel::SplitPane(const std::wstring& paneId, const std::wstring& di
                                bool injectMcpCredentials, bool background,
                                PROTOCOL_TAB_CREATION_RESULT& result)
 {
-    BstrGuard pid(ToBstr(paneId));
-    BstrGuard dir(ToBstr(direction));
-    BstrGuard prof(ToBstr(profile));
-    BstrGuard cmd(ToBstr(commandline));
-    memset(&result, 0, sizeof(result));
-    return _server->SplitPane(pid, dir, size, prof, cmd,
+    auto pid = ToBstr(paneId);
+    auto dir = ToBstr(direction);
+    auto prof = ToBstr(profile);
+    auto cmd = ToBstr(commandline);
+    return _server->SplitPane(pid.get(), dir.get(), size, prof.get(), cmd.get(),
                               injectMcpCredentials ? TRUE : FALSE,
                               background ? TRUE : FALSE,
                               &result);
@@ -201,34 +185,33 @@ HRESULT ComChannel::SplitPane(const std::wstring& paneId, const std::wstring& di
 
 HRESULT ComChannel::ClosePane(const std::wstring& paneId)
 {
-    BstrGuard pid(ToBstr(paneId));
-    return _server->ClosePane(pid);
+    auto pid = ToBstr(paneId);
+    return _server->ClosePane(pid.get());
 }
 
 HRESULT ComChannel::SendInput(const std::wstring& paneId, const std::wstring& text)
 {
-    BstrGuard pid(ToBstr(paneId));
-    BstrGuard t(ToBstr(text));
-    return _server->SendInput(pid, t);
+    auto pid = ToBstr(paneId);
+    auto t = ToBstr(text);
+    return _server->SendInput(pid.get(), t.get());
 }
 
 HRESULT ComChannel::SetSessionVariable(const std::wstring& paneId, const std::wstring& name, const std::wstring& value)
 {
-    BstrGuard pid(ToBstr(paneId));
-    BstrGuard n(ToBstr(name));
-    BstrGuard v(ToBstr(value));
-    return _server->SetSessionVariable(pid, n, v);
+    auto pid = ToBstr(paneId);
+    auto n = ToBstr(name);
+    auto v = ToBstr(value);
+    return _server->SetSessionVariable(pid.get(), n.get(), v.get());
 }
 
 HRESULT ComChannel::SetSettings(const std::wstring& settingsContent, std::wstring& backupPath)
 {
-    BstrGuard content(ToBstr(settingsContent));
-    BSTR backup = nullptr;
-    HRESULT hr = _server->SetSettings(content, &backup);
+    auto content = ToBstr(settingsContent);
+    wil::unique_bstr backup;
+    HRESULT hr = _server->SetSettings(content.get(), &backup);
     if (SUCCEEDED(hr))
     {
-        backupPath = BstrToWstring(backup);
-        SysFreeString(backup);
+        backupPath = BstrToWstring(backup.get());
     }
     return hr;
 }
