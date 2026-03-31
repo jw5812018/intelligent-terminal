@@ -11,6 +11,8 @@
 #include <json/json.h>
 #include <til/io.h>
 
+#include <thread>
+
 using namespace Microsoft::WRL;
 
 // Static state — set once before registration, never mutated.
@@ -19,6 +21,8 @@ ProtocolRequestHandler* TerminalProtocolComServer::s_handler = nullptr;
 
 static DWORD g_comRegistration = 0;
 static std::shared_mutex g_mtx;
+static std::thread g_comMtaThread;
+static wil::unique_event g_comMtaStop;
 
 // Static instance tracking for event delivery to COM clients
 std::mutex TerminalProtocolComServer::s_instancesMutex;
@@ -39,19 +43,50 @@ try
 {
     std::unique_lock lock{ g_mtx };
 
-    const auto classFactory = Make<SimpleClassFactory<TerminalProtocolComServer>>();
-    RETURN_LAST_ERROR_IF_NULL(classFactory);
+    // Register the COM class factory on a dedicated MTA thread so that
+    // incoming COM calls are dispatched to MTA worker threads rather than
+    // the STA/UI thread.  This is critical for methods that block
+    // (QuickPick waits for user input, PollEvents waits for events) —
+    // dispatching those on the UI thread would deadlock or freeze the app.
+    g_comMtaStop.create(wil::EventOptions::ManualReset);
 
-    ComPtr<IUnknown> unk;
-    RETURN_IF_FAILED(classFactory.As(&unk));
+    wil::unique_event ready(wil::EventOptions::ManualReset);
+    HRESULT regHr = S_OK;
 
-    RETURN_IF_FAILED(CoRegisterClassObject(
-        __uuidof(TerminalProtocolComServer),
-        unk.Get(),
-        CLSCTX_LOCAL_SERVER,
-        REGCLS_MULTIPLEUSE,
-        &g_comRegistration));
+    g_comMtaThread = std::thread([&ready, &regHr]() {
+        auto coInit = wil::CoInitializeEx(COINIT_MULTITHREADED);
 
+        const auto classFactory = Make<SimpleClassFactory<TerminalProtocolComServer>>();
+        if (!classFactory)
+        {
+            regHr = HRESULT_FROM_WIN32(GetLastError());
+            ready.SetEvent();
+            return;
+        }
+
+        ComPtr<IUnknown> unk;
+        regHr = classFactory.As(&unk);
+        if (FAILED(regHr))
+        {
+            ready.SetEvent();
+            return;
+        }
+
+        regHr = CoRegisterClassObject(
+            __uuidof(TerminalProtocolComServer),
+            unk.Get(),
+            CLSCTX_LOCAL_SERVER,
+            REGCLS_MULTIPLEUSE,
+            &g_comRegistration);
+
+        ready.SetEvent();
+
+        // Keep this MTA thread alive so the COM registration stays active.
+        WaitForSingleObject(g_comMtaStop.get(), INFINITE);
+    });
+
+    ready.wait();
+    RETURN_IF_FAILED(regHr);
     return S_OK;
 }
 CATCH_RETURN()
@@ -64,6 +99,16 @@ HRESULT TerminalProtocolComServer::s_StopListening()
     {
         RETURN_IF_FAILED(CoRevokeClassObject(g_comRegistration));
         g_comRegistration = 0;
+    }
+
+    // Signal the MTA thread to exit
+    if (g_comMtaStop)
+    {
+        g_comMtaStop.SetEvent();
+    }
+    if (g_comMtaThread.joinable())
+    {
+        g_comMtaThread.join();
     }
 
     return S_OK;
@@ -825,10 +870,10 @@ try
     if (!_authenticated)
         return E_ACCESSDENIED;
 
-    // Ensure page event registration is triggered (lazy init like pipe path)
-    if (s_handler)
+    // Trigger lazy page event registration once per instance
+    if (!_eventsInitialized && s_handler)
     {
-        // Send a lightweight request to trigger _ensurePageEventsRegistered
+        _eventsInitialized = true;
         Json::Value capReq;
         capReq["type"] = "request";
         capReq["id"] = "com-poll-init";
@@ -841,6 +886,9 @@ try
     if (_eventSignal)
     {
         WaitForSingleObject(_eventSignal.get(), timeoutMs);
+        // Brief delay to allow batching — avoids tight COM round-trips
+        // when events arrive in rapid succession (e.g. VT sequences).
+        Sleep(20);
     }
 
     // Drain the queue

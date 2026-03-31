@@ -73,6 +73,7 @@ TerminalProtocolComServer : public Microsoft::WRL::RuntimeClass<Microsoft::WRL::
 
 private:
     bool _authenticated = false;
+    bool _eventsInitialized = false;
 
     // Per-instance event queue for PollEvents
     std::mutex _eventMutex;

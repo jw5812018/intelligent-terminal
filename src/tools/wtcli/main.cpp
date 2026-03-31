@@ -568,7 +568,7 @@ int main()
 
     // ── listen ──
     std::string listenTarget;
-    auto* listenCmd = app.add_subcommand("listen", "Stream real-time events from Windows Terminal")->alias("mon");
+    auto* listenCmd = app.add_subcommand("listen", "Stream real-time events from Windows Terminal");
     listenCmd->add_option("-t,--target", listenTarget, "Filter by pane ID");
     listenCmd->callback([&]() {
         auto ch = connect();
