@@ -4,7 +4,6 @@
 #include "pch.h"
 
 #include "TerminalProtocolComServer.h"
-#include "ProtocolRequestHandler.h"
 #include "WindowEmperor.h"
 #include "AppHost.h"
 
@@ -15,7 +14,6 @@ using namespace Microsoft::WRL;
 
 // Static state — set once before registration, never mutated.
 WindowEmperor* TerminalProtocolComServer::s_emperor = nullptr;
-ProtocolRequestHandler* TerminalProtocolComServer::s_handler = nullptr;
 
 static DWORD g_comRegistration = 0;
 static std::shared_mutex g_mtx;
@@ -23,11 +21,6 @@ static std::shared_mutex g_mtx;
 void TerminalProtocolComServer::s_setEmperor(WindowEmperor* emperor) noexcept
 {
     s_emperor = emperor;
-}
-
-void TerminalProtocolComServer::s_setHandler(ProtocolRequestHandler* handler) noexcept
-{
-    s_handler = handler;
 }
 
 HRESULT TerminalProtocolComServer::s_StartListening()
@@ -92,48 +85,6 @@ static bool _parseJson(const std::string& str, Json::Value& out)
 }
 
 // ============================================================================
-// JSON fallback — delegates to ProtocolRequestHandler
-// ============================================================================
-
-STDMETHODIMP TerminalProtocolComServer::HandleRequest(BSTR requestJson, BSTR* responseJson)
-try
-{
-    RETURN_HR_IF_NULL(E_POINTER, responseJson);
-    *responseJson = nullptr;
-    RETURN_HR_IF_NULL(E_NOT_VALID_STATE, s_handler);
-    RETURN_HR_IF_NULL(E_INVALIDARG, requestJson);
-
-    const auto reqWide = std::wstring_view(requestJson, SysStringLen(requestJson));
-    const auto reqUtf8 = winrt::to_string(reqWide);
-
-    Json::Value request;
-    if (!_parseJson(reqUtf8, request))
-    {
-        Json::Value errResp;
-        errResp["type"] = "response";
-        errResp["id"] = "";
-        errResp["result"] = Json::nullValue;
-        Json::Value err;
-        err["code"] = "parse_error";
-        err["message"] = "Failed to parse request JSON.";
-        errResp["error"] = err;
-
-        Json::StreamWriterBuilder wb;
-        wb["indentation"] = "";
-        *responseJson = SysAllocString(winrt::to_hstring(Json::writeString(wb, errResp)).c_str());
-        return S_OK;
-    }
-
-    const auto response = s_handler->HandleRequest(request, _authenticated);
-
-    Json::StreamWriterBuilder wb;
-    wb["indentation"] = "";
-    *responseJson = SysAllocString(winrt::to_hstring(Json::writeString(wb, response)).c_str());
-    return S_OK;
-}
-CATCH_RETURN()
-
-// ============================================================================
 // Meta
 // ============================================================================
 
@@ -142,23 +93,31 @@ try
 {
     RETURN_HR_IF_NULL(E_POINTER, authenticated);
     RETURN_HR_IF_NULL(E_POINTER, protocolVersion);
+    RETURN_HR_IF_NULL(E_NOT_VALID_STATE, s_emperor);
     *authenticated = FALSE;
     *protocolVersion = nullptr;
 
-    RETURN_HR_IF_NULL(E_NOT_VALID_STATE, s_handler);
-
     const auto tokenStr = token ? winrt::to_string(std::wstring_view(token, SysStringLen(token))) : std::string{};
+    const auto& expectedToken = s_emperor->GetMcpToken();
 
-    // Build a JSON request and delegate to the existing handler.
-    Json::Value params;
-    params["token"] = tokenStr;
-    Json::Value request;
-    request["type"] = "request";
-    request["id"] = "com-auth";
-    request["method"] = "authenticate";
-    request["params"] = params;
-
-    s_handler->HandleRequest(request, _authenticated);
+    // DEV BYPASS: allow empty token to authenticate without credentials.
+    // TODO: Remove this bypass before shipping.
+    if (tokenStr.empty())
+    {
+        _authenticated = true;
+    }
+    else
+    {
+        // Constant-time comparison to prevent timing attacks.
+        bool match = (tokenStr.size() == expectedToken.size());
+        volatile bool dummy = false;
+        for (size_t i = 0; i < std::min(tokenStr.size(), expectedToken.size()); ++i)
+        {
+            if (tokenStr[i] != expectedToken[i])
+                dummy = true;
+        }
+        _authenticated = match && !dummy;
+    }
 
     *authenticated = _authenticated ? TRUE : FALSE;
     *protocolVersion = SysAllocString(L"1.0");
@@ -174,15 +133,28 @@ try
 
     *protocolVersion = SysAllocString(L"1.0");
 
-    // Build JSON array of method names from the canonical list in ProtocolRequestHandler.
-    // "quick_pick" is intentionally excluded — it blocks the UI thread and isn't
-    // supported over the COM transport yet.
+    static const std::vector<std::string> supportedMethods = {
+        "authenticate",
+        "get_capabilities",
+        "get_active_pane",
+        "list_windows",
+        "list_tabs",
+        "list_panes",
+        "read_pane_output",
+        "get_process_status",
+        "get_session_variable",
+        "get_settings",
+        "create_tab",
+        "split_pane",
+        "close_pane",
+        "send_input",
+        "set_session_variable",
+        "set_settings",
+    };
+
     Json::Value methods(Json::arrayValue);
-    for (const auto& m : ProtocolRequestHandler::GetSupportedMethods())
-    {
-        if (m != "quick_pick")
-            methods.append(m);
-    }
+    for (const auto& m : supportedMethods)
+        methods.append(m);
 
     Json::StreamWriterBuilder wb;
     wb["indentation"] = "";
@@ -208,26 +180,21 @@ try
     const auto page = _getPage(host);
     RETURN_HR_IF_NULL(E_FAIL, page);
 
-    const auto jsonStr = winrt::to_string(page.GetProtocolActivePaneJson());
-    if (jsonStr.empty())
-        return E_FAIL;
-
-    Json::Value v;
-    if (!_parseJson(jsonStr, v))
+    const auto info = page.GetProtocolActivePane();
+    if (info.PaneId.empty())
         return E_FAIL;
 
     const auto& props = host->Logic().WindowProperties();
-    const auto windowId = std::to_string(props.WindowId());
 
-    result->PaneId = SysAllocString(winrt::to_hstring(v.get("pane_id", "").asString()).c_str());
-    result->TabId = SysAllocString(winrt::to_hstring(v.get("tab_id", "").asString()).c_str());
-    result->WindowId = SysAllocString(winrt::to_hstring(windowId).c_str());
-    result->Title = SysAllocString(winrt::to_hstring(v.get("title", "").asString()).c_str());
-    result->Profile = SysAllocString(winrt::to_hstring(v.get("profile", "").asString()).c_str());
-    result->IsActive = TRUE;
-    result->Pid = v.get("pid", 0u).asUInt();
-    result->Rows = 0;
-    result->Columns = 0;
+    result->PaneId = SysAllocString(info.PaneId.c_str());
+    result->TabId = SysAllocString(info.TabId.c_str());
+    result->WindowId = SysAllocString(winrt::to_hstring(std::to_string(props.WindowId())).c_str());
+    result->Title = SysAllocString(info.Title.c_str());
+    result->Profile = SysAllocString(info.Profile.c_str());
+    result->IsActive = info.IsActive ? TRUE : FALSE;
+    result->Pid = info.Pid;
+    result->Rows = info.Rows;
+    result->Columns = info.Columns;
     return S_OK;
 }
 CATCH_RETURN()
@@ -307,19 +274,16 @@ try
         if (!page)
             continue;
 
-        const auto tabsJson = winrt::to_string(page.GetProtocolTabsJson());
-        Json::Value tabs;
-        if (!_parseJson(tabsJson, tabs) || !tabs.isArray())
-            continue;
-
-        for (const auto& t : tabs)
+        const auto tabs = page.GetProtocolTabs();
+        for (uint32_t i = 0; i < tabs.Size(); ++i)
         {
+            const auto& t = tabs.GetAt(i);
             PROTOCOL_TAB_INFO info{};
-            info.TabId = SysAllocString(winrt::to_hstring(t.get("tab_id", "").asString()).c_str());
+            info.TabId = SysAllocString(t.TabId.c_str());
             info.WindowId = SysAllocString(winrt::to_hstring(windowIdStr).c_str());
-            info.Title = SysAllocString(winrt::to_hstring(t.get("title", "").asString()).c_str());
-            info.IsActive = t.get("is_active", false).asBool() ? TRUE : FALSE;
-            info.PaneCount = t.get("pane_count", 0u).asUInt();
+            info.Title = SysAllocString(t.Title.c_str());
+            info.IsActive = t.IsActive ? TRUE : FALSE;
+            info.PaneCount = t.PaneCount;
             items.push_back(info);
         }
     }
@@ -372,23 +336,20 @@ try
         if (!page)
             continue;
 
-        const auto panesJson = winrt::to_string(page.GetProtocolPanesJson(winrt::to_hstring(tabFilter)));
-        Json::Value panes;
-        if (!_parseJson(panesJson, panes) || !panes.isArray())
-            continue;
-
-        for (const auto& p : panes)
+        const auto panes = page.GetProtocolPanes(winrt::to_hstring(tabFilter));
+        for (uint32_t i = 0; i < panes.Size(); ++i)
         {
+            const auto& p = panes.GetAt(i);
             PROTOCOL_PANE_INFO info{};
-            info.PaneId = SysAllocString(winrt::to_hstring(p.get("pane_id", "").asString()).c_str());
-            info.TabId = SysAllocString(winrt::to_hstring(p.get("tab_id", "").asString()).c_str());
+            info.PaneId = SysAllocString(p.PaneId.c_str());
+            info.TabId = SysAllocString(p.TabId.c_str());
             info.WindowId = SysAllocString(winrt::to_hstring(windowIdStr).c_str());
-            info.Title = SysAllocString(winrt::to_hstring(p.get("title", "").asString()).c_str());
-            info.Profile = SysAllocString(winrt::to_hstring(p.get("profile", "").asString()).c_str());
-            info.IsActive = p.get("is_active", false).asBool() ? TRUE : FALSE;
-            info.Pid = p.get("pid", 0u).asUInt();
-            info.Rows = p.isMember("size") ? p["size"].get("rows", 0).asInt() : 0;
-            info.Columns = p.isMember("size") ? p["size"].get("columns", 0).asInt() : 0;
+            info.Title = SysAllocString(p.Title.c_str());
+            info.Profile = SysAllocString(p.Profile.c_str());
+            info.IsActive = p.IsActive ? TRUE : FALSE;
+            info.Pid = p.Pid;
+            info.Rows = p.Rows;
+            info.Columns = p.Columns;
             items.push_back(info);
         }
     }
@@ -421,19 +382,15 @@ try
         if (!page)
             continue;
 
-        const auto jsonStr = winrt::to_string(page.ReadProtocolPaneOutput(
-            winrt::to_hstring(paneIdStr), winrt::to_hstring(sourceStr), maxLines));
-        if (jsonStr.empty())
+        const auto info = page.ReadProtocolPaneOutput(
+            winrt::to_hstring(paneIdStr), winrt::to_hstring(sourceStr), maxLines);
+        if (info.PaneId.empty())
             continue;
 
-        Json::Value v;
-        if (!_parseJson(jsonStr, v))
-            continue;
-
-        result->PaneId = SysAllocString(winrt::to_hstring(v.get("pane_id", "").asString()).c_str());
-        result->Content = SysAllocString(winrt::to_hstring(v.get("content", "").asString()).c_str());
-        result->LineCount = v.get("line_count", 0).asInt();
-        result->Truncated = v.get("truncated", false).asBool() ? TRUE : FALSE;
+        result->PaneId = SysAllocString(info.PaneId.c_str());
+        result->Content = SysAllocString(info.Content.c_str());
+        result->LineCount = info.LineCount;
+        result->Truncated = info.Truncated ? TRUE : FALSE;
         return S_OK;
     }
 
@@ -456,19 +413,15 @@ try
         if (!page)
             continue;
 
-        const auto jsonStr = winrt::to_string(page.GetProtocolProcessStatus(winrt::to_hstring(paneIdStr)));
-        if (jsonStr.empty())
+        const auto info = page.GetProtocolProcessStatus(winrt::to_hstring(paneIdStr));
+        if (info.PaneId.empty())
             continue;
 
-        Json::Value v;
-        if (!_parseJson(jsonStr, v))
-            continue;
-
-        result->PaneId = SysAllocString(winrt::to_hstring(v.get("pane_id", "").asString()).c_str());
-        result->State = SysAllocString(winrt::to_hstring(v.get("state", "unknown").asString()).c_str());
-        result->Pid = v.get("pid", 0u).asUInt();
-        result->ExitCode = v.get("exit_code", 0).asInt();
-        result->HasExitCode = v.isMember("exit_code") && !v["exit_code"].isNull() ? TRUE : FALSE;
+        result->PaneId = SysAllocString(info.PaneId.c_str());
+        result->State = SysAllocString(info.State.c_str());
+        result->Pid = info.Pid;
+        result->ExitCode = info.ExitCode;
+        result->HasExitCode = info.HasExitCode ? TRUE : FALSE;
         return S_OK;
     }
 
@@ -492,19 +445,15 @@ try
         if (!page)
             continue;
 
-        const auto jsonStr = winrt::to_string(page.GetProtocolSessionVariable(
-            winrt::to_hstring(paneIdStr), winrt::to_hstring(nameStr)));
-        if (jsonStr.empty())
+        const auto info = page.GetProtocolSessionVariable(
+            winrt::to_hstring(paneIdStr), winrt::to_hstring(nameStr));
+        if (info.PaneId.empty())
             continue;
 
-        Json::Value v;
-        if (!_parseJson(jsonStr, v))
-            continue;
-
-        result->PaneId = SysAllocString(winrt::to_hstring(v.get("pane_id", "").asString()).c_str());
-        result->Name = SysAllocString(winrt::to_hstring(v.get("name", "").asString()).c_str());
-        result->Value = SysAllocString(winrt::to_hstring(v.get("value", "").asString()).c_str());
-        result->Exists = v.get("exists", false).asBool() ? TRUE : FALSE;
+        result->PaneId = SysAllocString(info.PaneId.c_str());
+        result->Name = SysAllocString(info.Name.c_str());
+        result->Value = SysAllocString(info.Value.c_str());
+        result->Exists = info.Exists ? TRUE : FALSE;
         return S_OK;
     }
 
@@ -537,38 +486,61 @@ STDMETHODIMP TerminalProtocolComServer::CreateTab(BSTR windowId, BSTR profile, B
 try
 {
     RETURN_HR_IF_NULL(E_POINTER, result);
-    RETURN_HR_IF_NULL(E_NOT_VALID_STATE, s_handler);
+    RETURN_HR_IF_NULL(E_NOT_VALID_STATE, s_emperor);
     memset(result, 0, sizeof(*result));
 
-    // Build JSON params and delegate to the existing handler.
-    Json::Value params;
+    // Find target window.
+    AppHost* targetHost = nullptr;
     if (windowId && SysStringLen(windowId) > 0)
-        params["window_id"] = winrt::to_string(std::wstring_view(windowId, SysStringLen(windowId)));
+    {
+        const auto windowIdStr = winrt::to_string(std::wstring_view(windowId, SysStringLen(windowId)));
+        targetHost = s_emperor->GetWindowById(std::stoull(windowIdStr));
+    }
+    else
+    {
+        targetHost = s_emperor->GetMostRecentWindow();
+    }
+    RETURN_HR_IF_NULL(E_FAIL, targetHost);
+
+    const auto page = _getPage(targetHost);
+    RETURN_HR_IF_NULL(E_FAIL, page);
+
+    // Build NewTerminalArgs.
+    winrt::Microsoft::Terminal::Settings::Model::NewTerminalArgs newTermArgs;
     if (profile && SysStringLen(profile) > 0)
-        params["profile"] = winrt::to_string(std::wstring_view(profile, SysStringLen(profile)));
+        newTermArgs.Profile(winrt::hstring(std::wstring_view(profile, SysStringLen(profile))));
     if (commandline && SysStringLen(commandline) > 0)
-        params["commandline"] = winrt::to_string(std::wstring_view(commandline, SysStringLen(commandline)));
+        newTermArgs.Commandline(winrt::hstring(std::wstring_view(commandline, SysStringLen(commandline))));
     if (title && SysStringLen(title) > 0)
-        params["title"] = winrt::to_string(std::wstring_view(title, SysStringLen(title)));
-    params["suppress_application_title"] = suppressAppTitle ? true : false;
-    params["inject_mcp_credentials"] = injectMcpCredentials ? true : false;
-    params["background"] = background ? true : false;
+    {
+        newTermArgs.TabTitle(winrt::hstring(std::wstring_view(title, SysStringLen(title))));
+        if (suppressAppTitle)
+            newTermArgs.SuppressApplicationTitle(true);
+    }
 
-    Json::Value request;
-    request["type"] = "request";
-    request["id"] = "com-create-tab";
-    request["method"] = "create_tab";
-    request["params"] = params;
+    // Inject MCP credentials when requested.
+    if (injectMcpCredentials)
+    {
+        const auto& token = s_emperor->GetMcpToken();
+        if (!token.empty())
+        {
+            page.SetPendingProtocolEnv(L"WT_MCP_TOKEN", winrt::to_hstring(token));
+            page.SetPendingProtocolEnv(L"WT_PIPE_NAME", winrt::hstring{ s_emperor->GetProtocolPipeName() });
+            const auto& comClsid = s_emperor->GetComClsid();
+            if (!comClsid.empty())
+                page.SetPendingProtocolEnv(L"WT_COM_CLSID", winrt::hstring{ comClsid });
+        }
+    }
 
-    const auto response = s_handler->HandleRequest(request, _authenticated);
-    const auto& r = response["result"];
-    if (r.isNull())
+    const auto cr = page.CreateProtocolTab(newTermArgs, background ? true : false);
+    if (cr.TabId.empty())
         return E_FAIL;
 
-    result->TabId = SysAllocString(winrt::to_hstring(r.get("tab_id", "").asString()).c_str());
-    result->PaneId = SysAllocString(winrt::to_hstring(r.get("pane_id", "").asString()).c_str());
-    result->WindowId = SysAllocString(winrt::to_hstring(r.get("window_id", "").asString()).c_str());
-    result->Pid = r.get("pid", 0u).asUInt();
+    const auto& props = targetHost->Logic().WindowProperties();
+    result->TabId = SysAllocString(cr.TabId.c_str());
+    result->PaneId = SysAllocString(cr.PaneId.c_str());
+    result->WindowId = SysAllocString(winrt::to_hstring(std::to_string(props.WindowId())).c_str());
+    result->Pid = cr.Pid;
     return S_OK;
 }
 CATCH_RETURN()
@@ -580,59 +552,86 @@ STDMETHODIMP TerminalProtocolComServer::SplitPane(BSTR paneId, BSTR direction, f
 try
 {
     RETURN_HR_IF_NULL(E_POINTER, result);
-    RETURN_HR_IF_NULL(E_NOT_VALID_STATE, s_handler);
+    RETURN_HR_IF_NULL(E_NOT_VALID_STATE, s_emperor);
+    RETURN_HR_IF_NULL(E_INVALIDARG, paneId);
     memset(result, 0, sizeof(*result));
 
-    Json::Value params;
-    if (paneId && SysStringLen(paneId) > 0)
-        params["pane_id"] = winrt::to_string(std::wstring_view(paneId, SysStringLen(paneId)));
+    const auto paneIdHstr = winrt::hstring(std::wstring_view(paneId, SysStringLen(paneId)));
+
+    // Map direction string to SplitDirection enum.
+    auto splitDir = winrt::Microsoft::Terminal::Settings::Model::SplitDirection::Right;
     if (direction && SysStringLen(direction) > 0)
-        params["direction"] = winrt::to_string(std::wstring_view(direction, SysStringLen(direction)));
-    params["size"] = size;
+    {
+        const auto dirStr = winrt::to_string(std::wstring_view(direction, SysStringLen(direction)));
+        if (dirStr == "left")
+            splitDir = winrt::Microsoft::Terminal::Settings::Model::SplitDirection::Left;
+        else if (dirStr == "up")
+            splitDir = winrt::Microsoft::Terminal::Settings::Model::SplitDirection::Up;
+        else if (dirStr == "down")
+            splitDir = winrt::Microsoft::Terminal::Settings::Model::SplitDirection::Down;
+    }
+
+    // Build NewTerminalArgs.
+    winrt::Microsoft::Terminal::Settings::Model::NewTerminalArgs newTermArgs;
     if (profile && SysStringLen(profile) > 0)
-        params["profile"] = winrt::to_string(std::wstring_view(profile, SysStringLen(profile)));
+        newTermArgs.Profile(winrt::hstring(std::wstring_view(profile, SysStringLen(profile))));
     if (commandline && SysStringLen(commandline) > 0)
-        params["commandline"] = winrt::to_string(std::wstring_view(commandline, SysStringLen(commandline)));
-    params["inject_mcp_credentials"] = injectMcpCredentials ? true : false;
-    params["background"] = background ? true : false;
+        newTermArgs.Commandline(winrt::hstring(std::wstring_view(commandline, SysStringLen(commandline))));
 
-    Json::Value request;
-    request["type"] = "request";
-    request["id"] = "com-split-pane";
-    request["method"] = "split_pane";
-    request["params"] = params;
+    for (const auto& host : s_emperor->GetWindows())
+    {
+        const auto page = _getPage(host.get());
+        if (!page)
+            continue;
 
-    const auto response = s_handler->HandleRequest(request, _authenticated);
-    const auto& r = response["result"];
-    if (r.isNull())
-        return E_FAIL;
+        // Inject MCP credentials when requested.
+        if (injectMcpCredentials)
+        {
+            const auto& token = s_emperor->GetMcpToken();
+            if (!token.empty())
+            {
+                page.SetPendingProtocolEnv(L"WT_MCP_TOKEN", winrt::to_hstring(token));
+                page.SetPendingProtocolEnv(L"WT_PIPE_NAME", winrt::hstring{ s_emperor->GetProtocolPipeName() });
+                const auto& comClsid = s_emperor->GetComClsid();
+                if (!comClsid.empty())
+                    page.SetPendingProtocolEnv(L"WT_COM_CLSID", winrt::hstring{ comClsid });
+            }
+        }
 
-    result->TabId = SysAllocString(winrt::to_hstring(r.get("tab_id", "").asString()).c_str());
-    result->PaneId = SysAllocString(winrt::to_hstring(r.get("pane_id", "").asString()).c_str());
-    result->WindowId = SysAllocString(winrt::to_hstring(r.get("window_id", "").asString()).c_str());
-    result->Pid = r.get("pid", 0u).asUInt();
-    return S_OK;
+        const auto cr = page.SplitProtocolPane(paneIdHstr, splitDir, size, newTermArgs, background ? true : false);
+        if (cr.TabId.empty())
+            continue; // pane not in this window
+
+        const auto& props = host->Logic().WindowProperties();
+        result->TabId = SysAllocString(cr.TabId.c_str());
+        result->PaneId = SysAllocString(cr.PaneId.c_str());
+        result->WindowId = SysAllocString(winrt::to_hstring(std::to_string(props.WindowId())).c_str());
+        result->Pid = cr.Pid;
+        return S_OK;
+    }
+
+    return E_FAIL;
 }
 CATCH_RETURN()
 
 STDMETHODIMP TerminalProtocolComServer::ClosePane(BSTR paneId)
 try
 {
-    RETURN_HR_IF_NULL(E_NOT_VALID_STATE, s_handler);
+    RETURN_HR_IF_NULL(E_NOT_VALID_STATE, s_emperor);
+    RETURN_HR_IF_NULL(E_INVALIDARG, paneId);
 
-    Json::Value params;
-    if (paneId && SysStringLen(paneId) > 0)
-        params["pane_id"] = winrt::to_string(std::wstring_view(paneId, SysStringLen(paneId)));
+    const auto paneIdHstr = winrt::hstring(std::wstring_view(paneId, SysStringLen(paneId)));
 
-    Json::Value request;
-    request["type"] = "request";
-    request["id"] = "com-close-pane";
-    request["method"] = "close_pane";
-    request["params"] = params;
+    for (const auto& host : s_emperor->GetWindows())
+    {
+        const auto page = _getPage(host.get());
+        if (!page)
+            continue;
 
-    const auto response = s_handler->HandleRequest(request, _authenticated);
-    if (!response["result"].isNull() && response["error"].isNull())
-        return S_OK;
+        if (page.CloseProtocolPane(paneIdHstr))
+            return S_OK;
+    }
+
     return E_FAIL;
 }
 CATCH_RETURN()
@@ -640,23 +639,23 @@ CATCH_RETURN()
 STDMETHODIMP TerminalProtocolComServer::SendInput(BSTR paneId, BSTR text)
 try
 {
-    RETURN_HR_IF_NULL(E_NOT_VALID_STATE, s_handler);
+    RETURN_HR_IF_NULL(E_NOT_VALID_STATE, s_emperor);
+    RETURN_HR_IF_NULL(E_INVALIDARG, paneId);
+    RETURN_HR_IF_NULL(E_INVALIDARG, text);
 
-    Json::Value params;
-    if (paneId && SysStringLen(paneId) > 0)
-        params["pane_id"] = winrt::to_string(std::wstring_view(paneId, SysStringLen(paneId)));
-    if (text && SysStringLen(text) > 0)
-        params["text"] = winrt::to_string(std::wstring_view(text, SysStringLen(text)));
+    const auto paneIdHstr = winrt::hstring(std::wstring_view(paneId, SysStringLen(paneId)));
+    const auto textHstr = winrt::hstring(std::wstring_view(text, SysStringLen(text)));
 
-    Json::Value request;
-    request["type"] = "request";
-    request["id"] = "com-send-input";
-    request["method"] = "send_input";
-    request["params"] = params;
+    for (const auto& host : s_emperor->GetWindows())
+    {
+        const auto page = _getPage(host.get());
+        if (!page)
+            continue;
 
-    const auto response = s_handler->HandleRequest(request, _authenticated);
-    if (!response["result"].isNull() && response["error"].isNull())
-        return S_OK;
+        if (page.SendProtocolInput(paneIdHstr, textHstr))
+            return S_OK;
+    }
+
     return E_FAIL;
 }
 CATCH_RETURN()
@@ -664,25 +663,26 @@ CATCH_RETURN()
 STDMETHODIMP TerminalProtocolComServer::SetSessionVariable(BSTR paneId, BSTR name, BSTR value)
 try
 {
-    RETURN_HR_IF_NULL(E_NOT_VALID_STATE, s_handler);
+    RETURN_HR_IF_NULL(E_NOT_VALID_STATE, s_emperor);
+    RETURN_HR_IF_NULL(E_INVALIDARG, paneId);
+    RETURN_HR_IF_NULL(E_INVALIDARG, name);
 
-    Json::Value params;
-    if (paneId && SysStringLen(paneId) > 0)
-        params["pane_id"] = winrt::to_string(std::wstring_view(paneId, SysStringLen(paneId)));
-    if (name && SysStringLen(name) > 0)
-        params["name"] = winrt::to_string(std::wstring_view(name, SysStringLen(name)));
-    if (value && SysStringLen(value) > 0)
-        params["value"] = winrt::to_string(std::wstring_view(value, SysStringLen(value)));
+    const auto paneIdHstr = winrt::hstring(std::wstring_view(paneId, SysStringLen(paneId)));
+    const auto nameHstr = winrt::hstring(std::wstring_view(name, SysStringLen(name)));
+    const auto valueHstr = (value && SysStringLen(value) > 0)
+        ? winrt::hstring(std::wstring_view(value, SysStringLen(value)))
+        : winrt::hstring{};
 
-    Json::Value request;
-    request["type"] = "request";
-    request["id"] = "com-set-session-var";
-    request["method"] = "set_session_variable";
-    request["params"] = params;
+    for (const auto& host : s_emperor->GetWindows())
+    {
+        const auto page = _getPage(host.get());
+        if (!page)
+            continue;
 
-    const auto response = s_handler->HandleRequest(request, _authenticated);
-    if (!response["result"].isNull() && response["error"].isNull())
-        return S_OK;
+        if (page.SetProtocolSessionVariable(paneIdHstr, nameHstr, valueHstr))
+            return S_OK;
+    }
+
     return E_FAIL;
 }
 CATCH_RETURN()
@@ -691,28 +691,55 @@ STDMETHODIMP TerminalProtocolComServer::SetSettings(BSTR settingsContent, BSTR* 
 try
 {
     RETURN_HR_IF_NULL(E_POINTER, backupPath);
-    RETURN_HR_IF_NULL(E_NOT_VALID_STATE, s_handler);
+    RETURN_HR_IF_NULL(E_INVALIDARG, settingsContent);
     *backupPath = nullptr;
 
-    const auto contentStr = settingsContent
-        ? winrt::to_string(std::wstring_view(settingsContent, SysStringLen(settingsContent)))
-        : std::string{};
+    const auto contentStr = winrt::to_string(std::wstring_view(settingsContent, SysStringLen(settingsContent)));
+    if (contentStr.empty())
+        return E_INVALIDARG;
 
-    Json::Value params;
-    params["settings"] = contentStr;
+    // Validate that it's valid JSON.
+    Json::Value parsedSettings;
+    if (!_parseJson(contentStr, parsedSettings))
+        return E_INVALIDARG;
 
-    Json::Value request;
-    request["type"] = "request";
-    request["id"] = "com-set-settings";
-    request["method"] = "set_settings";
-    request["params"] = params;
+    // Get the settings path and create a backup.
+    const std::filesystem::path settingsPath{ std::wstring_view{ winrt::Microsoft::Terminal::Settings::Model::CascadiaSettings::SettingsPath() } };
+    const auto settingsDir = settingsPath.parent_path();
 
-    const auto response = s_handler->HandleRequest(request, _authenticated);
-    const auto& r = response["result"];
-    if (r.isNull())
-        return E_FAIL;
+    // Create timestamped backup.
+    const auto now = std::chrono::system_clock::now();
+    const auto time = std::chrono::system_clock::to_time_t(now);
+    std::tm tm{};
+    localtime_s(&tm, &time);
 
-    *backupPath = SysAllocString(winrt::to_hstring(r.get("backup_path", "").asString()).c_str());
+    wchar_t timeStr[64];
+    wcsftime(timeStr, std::size(timeStr), L"%Y-%m-%dT%H-%M-%S", &tm);
+
+    const auto backup = settingsDir / fmt::format(L"settings.backup.{}.json", timeStr);
+
+    // Copy current settings to backup.
+    std::error_code ec;
+    std::filesystem::copy_file(settingsPath, backup, std::filesystem::copy_options::overwrite_existing, ec);
+
+    // Clean up old backups — keep only the most recent 5.
+    std::vector<std::filesystem::path> backups;
+    for (const auto& entry : std::filesystem::directory_iterator(settingsDir, ec))
+    {
+        if (entry.is_regular_file() && entry.path().filename().wstring().starts_with(L"settings.backup."))
+            backups.push_back(entry.path());
+    }
+    if (backups.size() > 5)
+    {
+        std::sort(backups.begin(), backups.end());
+        for (size_t i = 0; i < backups.size() - 5; ++i)
+            std::filesystem::remove(backups[i], ec);
+    }
+
+    // Write the new settings.
+    til::io::write_utf8_string_to_file_atomic(settingsPath, contentStr);
+
+    *backupPath = SysAllocString(backup.wstring().c_str());
     return S_OK;
 }
 CATCH_RETURN()

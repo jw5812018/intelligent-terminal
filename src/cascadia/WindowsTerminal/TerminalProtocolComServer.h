@@ -16,16 +16,12 @@
 #define __CLSID_TerminalProtocolServer "D5B7C9E1-4F6A-4B8C-D9E0-F1A2B3C4D5E6"
 #endif
 
-class ProtocolRequestHandler;
 class WindowEmperor;
 
 struct __declspec(uuid(__CLSID_TerminalProtocolServer))
 TerminalProtocolComServer : public Microsoft::WRL::RuntimeClass<Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::RuntimeClassType::ClassicCom>, ITerminalProtocolServer>
 {
-    // ITerminalProtocolServer
-    STDMETHODIMP HandleRequest(BSTR requestJson, BSTR* responseJson) override; // JSON fallback (retained during transition)
-
-    // Typed methods
+    // ITerminalProtocolServer — typed methods
     STDMETHODIMP Authenticate(BSTR token, BOOL* authenticated, BSTR* protocolVersion) override;
     STDMETHODIMP GetCapabilities(BSTR* protocolVersion, BSTR* supportedMethodsJson) override;
 
@@ -51,7 +47,6 @@ TerminalProtocolComServer : public Microsoft::WRL::RuntimeClass<Microsoft::WRL::
 
     // Static setup — must be called before s_StartListening().
     static void s_setEmperor(WindowEmperor* emperor) noexcept;
-    static void s_setHandler(ProtocolRequestHandler* handler) noexcept;
 
     static HRESULT s_StartListening();
     static HRESULT s_StopListening();
@@ -60,7 +55,6 @@ private:
     bool _authenticated = false;
 
     static WindowEmperor* s_emperor;
-    static ProtocolRequestHandler* s_handler;
 };
 
 #pragma warning(push)

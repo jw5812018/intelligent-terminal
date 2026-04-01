@@ -84,9 +84,6 @@ typedef struct _PROTOCOL_TAB_CREATION_RESULT {
 ]
 interface ITerminalProtocolServer : IUnknown
 {
-    // ── JSON fallback (retained for backward compat during transition) ──
-    HRESULT HandleRequest([in] BSTR requestJson, [out, retval] BSTR* responseJson);
-
     // ── Meta ──
     HRESULT Authenticate([in] BSTR token, [out] BOOL* authenticated, [out] BSTR* protocolVersion);
     HRESULT GetCapabilities([out] BSTR* protocolVersion, [out] BSTR* supportedMethodsJson);

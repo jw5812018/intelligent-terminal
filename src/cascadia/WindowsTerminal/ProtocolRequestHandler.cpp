@@ -271,23 +271,22 @@ Json::Value ProtocolRequestHandler::_handleGetActivePane(const Json::Value& /*pa
         throw std::runtime_error("Terminal page not available.");
     }
 
-    const auto resultJson = winrt::to_string(page.GetProtocolActivePaneJson());
-    if (resultJson.empty())
+    const auto info = page.GetProtocolActivePane();
+    if (info.PaneId.empty())
     {
         throw std::runtime_error("No active pane.");
     }
 
-    Json::Value result;
-    Json::CharReaderBuilder readerBuilder;
-    std::string parseErrors;
-    std::istringstream stream(resultJson);
-    if (!Json::parseFromStream(readerBuilder, stream, &result, &parseErrors))
-    {
-        throw std::runtime_error("Failed to parse active pane info.");
-    }
-
     const auto& props = host->Logic().WindowProperties();
+
+    Json::Value result;
+    result["pane_id"] = winrt::to_string(info.PaneId);
+    result["tab_id"] = winrt::to_string(info.TabId);
     result["window_id"] = std::to_string(props.WindowId());
+    result["title"] = winrt::to_string(info.Title);
+    result["profile"] = winrt::to_string(info.Profile);
+    result["is_active"] = info.IsActive;
+    result["pid"] = static_cast<Json::UInt>(info.Pid);
     return result;
 }
 
@@ -349,23 +348,17 @@ Json::Value ProtocolRequestHandler::_handleListTabs(const Json::Value& params)
             continue;
         }
 
-        const auto tabsJson = winrt::to_string(page.GetProtocolTabsJson());
-        if (tabsJson.empty())
+        const auto tabs = page.GetProtocolTabs();
+        for (uint32_t i = 0; i < tabs.Size(); ++i)
         {
-            continue;
-        }
-
-        Json::Value tabs;
-        Json::CharReaderBuilder readerBuilder;
-        std::string parseErrors;
-        std::istringstream stream(tabsJson);
-        if (Json::parseFromStream(readerBuilder, stream, &tabs, &parseErrors) && tabs.isArray())
-        {
-            for (auto& tab : tabs)
-            {
-                tab["window_id"] = windowIdStr;
-                allTabs.append(tab);
-            }
+            const auto& t = tabs.GetAt(i);
+            Json::Value tab;
+            tab["tab_id"] = winrt::to_string(t.TabId);
+            tab["window_id"] = windowIdStr;
+            tab["title"] = winrt::to_string(t.Title);
+            tab["is_active"] = t.IsActive;
+            tab["pane_count"] = t.PaneCount;
+            allTabs.append(tab);
         }
     }
 
@@ -403,23 +396,21 @@ Json::Value ProtocolRequestHandler::_handleListPanes(const Json::Value& params)
             continue;
         }
 
-        const auto panesJson = winrt::to_string(page.GetProtocolPanesJson(winrt::to_hstring(tabIdFilter)));
-        if (panesJson.empty())
+        const auto panes = page.GetProtocolPanes(winrt::to_hstring(tabIdFilter));
+        for (uint32_t i = 0; i < panes.Size(); ++i)
         {
-            continue;
-        }
-
-        Json::Value panes;
-        Json::CharReaderBuilder readerBuilder;
-        std::string parseErrors;
-        std::istringstream stream(panesJson);
-        if (Json::parseFromStream(readerBuilder, stream, &panes, &parseErrors) && panes.isArray())
-        {
-            for (auto& pane : panes)
-            {
-                pane["window_id"] = windowIdStr;
-                allPanes.append(pane);
-            }
+            const auto& p = panes.GetAt(i);
+            Json::Value pane;
+            pane["pane_id"] = winrt::to_string(p.PaneId);
+            pane["tab_id"] = winrt::to_string(p.TabId);
+            pane["window_id"] = windowIdStr;
+            pane["title"] = winrt::to_string(p.Title);
+            pane["profile"] = winrt::to_string(p.Profile);
+            pane["is_active"] = p.IsActive;
+            pane["pid"] = static_cast<Json::UInt>(p.Pid);
+            pane["size"]["rows"] = p.Rows;
+            pane["size"]["columns"] = p.Columns;
+            allPanes.append(pane);
         }
     }
 
@@ -447,21 +438,19 @@ Json::Value ProtocolRequestHandler::_handleReadPaneOutput(const Json::Value& par
             continue;
         }
 
-        const auto resultJson = winrt::to_string(page.ReadProtocolPaneOutput(
+        const auto info = page.ReadProtocolPaneOutput(
             winrt::to_hstring(paneIdStr),
             winrt::to_hstring(source),
-            maxLines));
+            maxLines);
 
-        if (!resultJson.empty())
+        if (!info.PaneId.empty())
         {
             Json::Value result;
-            Json::CharReaderBuilder readerBuilder;
-            std::string parseErrors;
-            std::istringstream stream(resultJson);
-            if (Json::parseFromStream(readerBuilder, stream, &result, &parseErrors))
-            {
-                return result;
-            }
+            result["pane_id"] = winrt::to_string(info.PaneId);
+            result["content"] = winrt::to_string(info.Content);
+            result["line_count"] = info.LineCount;
+            result["truncated"] = info.Truncated;
+            return result;
         }
     }
 
@@ -484,17 +473,16 @@ Json::Value ProtocolRequestHandler::_handleGetProcessStatus(const Json::Value& p
             continue;
         }
 
-        const auto resultJson = winrt::to_string(page.GetProtocolProcessStatus(winrt::to_hstring(paneIdStr)));
-        if (!resultJson.empty())
+        const auto info = page.GetProtocolProcessStatus(winrt::to_hstring(paneIdStr));
+        if (!info.PaneId.empty())
         {
             Json::Value result;
-            Json::CharReaderBuilder readerBuilder;
-            std::string parseErrors;
-            std::istringstream stream(resultJson);
-            if (Json::parseFromStream(readerBuilder, stream, &result, &parseErrors))
-            {
-                return result;
-            }
+            result["pane_id"] = winrt::to_string(info.PaneId);
+            result["state"] = winrt::to_string(info.State);
+            result["pid"] = static_cast<Json::UInt>(info.Pid);
+            if (info.HasExitCode)
+                result["exit_code"] = info.ExitCode;
+            return result;
         }
     }
 
@@ -519,20 +507,18 @@ Json::Value ProtocolRequestHandler::_handleGetSessionVariable(const Json::Value&
             continue;
         }
 
-        const auto resultJson = winrt::to_string(page.GetProtocolSessionVariable(
+        const auto info = page.GetProtocolSessionVariable(
             winrt::to_hstring(paneIdStr),
-            winrt::to_hstring(name)));
+            winrt::to_hstring(name));
 
-        if (!resultJson.empty())
+        if (!info.PaneId.empty())
         {
             Json::Value result;
-            Json::CharReaderBuilder readerBuilder;
-            std::string parseErrors;
-            std::istringstream stream(resultJson);
-            if (Json::parseFromStream(readerBuilder, stream, &result, &parseErrors))
-            {
-                return result;
-            }
+            result["pane_id"] = winrt::to_string(info.PaneId);
+            result["name"] = winrt::to_string(info.Name);
+            result["value"] = info.Exists ? winrt::to_string(info.Value) : "";
+            result["exists"] = info.Exists;
+            return result;
         }
     }
 
@@ -618,25 +604,21 @@ Json::Value ProtocolRequestHandler::_handleCreateTab(const Json::Value& params)
 
     const auto background = params.get("background", true).asBool();
 
-    const auto resultJson = winrt::to_string(page.CreateProtocolTab(newTermArgs, background));
+    const auto cr = page.CreateProtocolTab(newTermArgs, background);
     // Note: CreateProtocolTab clears pending env vars internally.
-    if (resultJson.empty())
+    if (cr.TabId.empty())
     {
         throw std::runtime_error("Failed to create tab.");
     }
 
-    // Parse result and add window_id.
-    Json::Value result;
-    Json::CharReaderBuilder readerBuilder;
-    std::string parseErrors;
-    std::istringstream stream(resultJson);
-    if (!Json::parseFromStream(readerBuilder, stream, &result, &parseErrors))
-    {
-        throw std::runtime_error("Failed to parse tab creation result.");
-    }
-
     const auto& props = targetHost->Logic().WindowProperties();
+
+    Json::Value result;
+    result["tab_id"] = winrt::to_string(cr.TabId);
+    result["pane_id"] = winrt::to_string(cr.PaneId);
     result["window_id"] = std::to_string(props.WindowId());
+    if (cr.Pid != 0)
+        result["pid"] = static_cast<Json::UInt>(cr.Pid);
     return result;
 }
 
@@ -693,19 +675,17 @@ Json::Value ProtocolRequestHandler::_handleSplitPane(const Json::Value& params)
         }
 
         // Note: SplitProtocolPane clears pending env vars internally.
-        const auto resultJson = winrt::to_string(page.SplitProtocolPane(
-            winrt::to_hstring(paneIdStr), splitDir, size, newTermArgs, background));
+        const auto cr = page.SplitProtocolPane(
+            winrt::to_hstring(paneIdStr), splitDir, size, newTermArgs, background);
 
-        if (!resultJson.empty())
+        if (!cr.TabId.empty())
         {
             Json::Value result;
-            Json::CharReaderBuilder readerBuilder;
-            std::string parseErrors;
-            std::istringstream stream(resultJson);
-            if (Json::parseFromStream(readerBuilder, stream, &result, &parseErrors))
-            {
-                return result;
-            }
+            result["tab_id"] = winrt::to_string(cr.TabId);
+            result["pane_id"] = winrt::to_string(cr.PaneId);
+            if (cr.Pid != 0)
+                result["pid"] = static_cast<Json::UInt>(cr.Pid);
+            return result;
         }
     }
 

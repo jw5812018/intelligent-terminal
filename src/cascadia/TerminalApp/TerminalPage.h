@@ -179,17 +179,17 @@ namespace winrt::TerminalApp::implementation
         // Terminal Protocol Bridge Methods
         uint32_t TabCount() const;
         Windows::Foundation::IReference<uint32_t> FocusedTabIndex() const;
-        hstring GetProtocolActivePaneJson();
-        hstring GetProtocolTabsJson();
-        hstring GetProtocolPanesJson(hstring tabIdFilter);
-        hstring ReadProtocolPaneOutput(hstring paneId, hstring source, int32_t maxLines);
-        hstring GetProtocolProcessStatus(hstring paneId);
-        hstring GetProtocolSessionVariable(hstring paneId, hstring name);
+        TerminalApp::ProtocolPaneInfo GetProtocolActivePane();
+        Windows::Foundation::Collections::IVector<TerminalApp::ProtocolTabInfo> GetProtocolTabs();
+        Windows::Foundation::Collections::IVector<TerminalApp::ProtocolPaneInfo> GetProtocolPanes(hstring tabIdFilter);
+        TerminalApp::ProtocolPaneOutput ReadProtocolPaneOutput(hstring paneId, hstring source, int32_t maxLines);
+        TerminalApp::ProtocolProcessStatus GetProtocolProcessStatus(hstring paneId);
+        TerminalApp::ProtocolSessionVariable GetProtocolSessionVariable(hstring paneId, hstring name);
         bool SetProtocolSessionVariable(hstring paneId, hstring name, hstring value);
         void SetPendingProtocolEnv(hstring key, hstring value);
         void ClearPendingProtocolEnv();
-        hstring CreateProtocolTab(Microsoft::Terminal::Settings::Model::NewTerminalArgs args, bool background);
-        hstring SplitProtocolPane(hstring paneId, Microsoft::Terminal::Settings::Model::SplitDirection direction, float size, Microsoft::Terminal::Settings::Model::NewTerminalArgs args, bool background);
+        TerminalApp::ProtocolCreationResult CreateProtocolTab(Microsoft::Terminal::Settings::Model::NewTerminalArgs args, bool background);
+        TerminalApp::ProtocolCreationResult SplitProtocolPane(hstring paneId, Microsoft::Terminal::Settings::Model::SplitDirection direction, float size, Microsoft::Terminal::Settings::Model::NewTerminalArgs args, bool background);
         bool CloseProtocolPane(hstring paneId);
         bool SendProtocolInput(hstring paneId, hstring text);
         hstring ShowProtocolQuickPick(hstring title, hstring choicesJson, bool allowFreeInput);

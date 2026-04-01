@@ -1515,9 +1515,7 @@ void WindowEmperor::_initializeProtocolServer()
     _protocolServer->Start();
 
     // Register COM class factory for cross-process access (runs on STA/UI thread).
-    // The COM server delegates to the same ProtocolRequestHandler as the pipe server.
     TerminalProtocolComServer::s_setEmperor(this);
-    TerminalProtocolComServer::s_setHandler(_protocolHandler.get());
     if (SUCCEEDED_LOG(TerminalProtocolComServer::s_StartListening()))
     {
         // Stringify the CLSID so child processes can discover us via CoCreateInstance.
