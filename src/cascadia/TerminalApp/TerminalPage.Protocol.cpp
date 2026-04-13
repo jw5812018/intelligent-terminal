@@ -103,8 +103,8 @@ namespace winrt::TerminalApp::implementation
         if (!activePane)
             co_return result;
 
-        result.PaneId = winrt::to_hstring(std::to_string(activePane->ContentId().value()));
-        result.TabId = winrt::to_hstring(std::to_string(focusedTabIdx.value()));
+        result.PaneId = activePane->ContentId().value();
+        result.TabId = focusedTabIdx.value();
         result.IsActive = true;
 
         if (const auto termContent = activePane->GetContent().try_as<TerminalApp::TerminalPaneContent>())
@@ -134,7 +134,7 @@ namespace winrt::TerminalApp::implementation
                 continue;
 
             Protocol::TabInfo info{};
-            info.TabId = winrt::to_hstring(std::to_string(i));
+            info.TabId = i;
             info.Title = tab.Title();
             info.IsActive = focusedIdx.has_value() && (focusedIdx.value() == i);
             info.PaneCount = tabImpl->GetLeafPaneCount();
@@ -144,11 +144,9 @@ namespace winrt::TerminalApp::implementation
         co_return tabs;
     }
 
-    IAsyncOperation<Windows::Foundation::Collections::IVector<Protocol::PaneInfo>> TerminalPage::GetProtocolPanes(hstring tabIdFilter)
+    IAsyncOperation<Windows::Foundation::Collections::IVector<Protocol::PaneInfo>> TerminalPage::GetProtocolPanes(uint32_t tabIdFilter)
     {
         auto strong = get_strong();
-        // Parse filter before switching to UI thread.
-        const auto tabIdFilterStr = winrt::to_string(tabIdFilter);
 
         co_await wil::resume_foreground(Dispatcher());
 
@@ -156,8 +154,7 @@ namespace winrt::TerminalApp::implementation
 
         for (uint32_t tabIdx = 0; tabIdx < _tabs.Size(); ++tabIdx)
         {
-            const auto tabIdStr = std::to_string(tabIdx);
-            if (!tabIdFilterStr.empty() && tabIdStr != tabIdFilterStr)
+            if (tabIdFilter != UINT32_MAX && tabIdx != tabIdFilter)
                 continue;
 
             const auto tab = _tabs.GetAt(tabIdx);
@@ -176,8 +173,8 @@ namespace winrt::TerminalApp::implementation
                     return; // Skip branch nodes
 
                 Protocol::PaneInfo info{};
-                info.PaneId = winrt::to_hstring(std::to_string(pane->ContentId().value()));
-                info.TabId = winrt::to_hstring(tabIdStr);
+                info.PaneId = pane->ContentId().value();
+                info.TabId = tabIdx;
                 info.IsActive = (activePane == pane);
                 info.Pid = _getPidFromPane(pane);
 
@@ -206,11 +203,9 @@ namespace winrt::TerminalApp::implementation
         co_return panes;
     }
 
-    IAsyncOperation<Protocol::PaneOutput> TerminalPage::ReadProtocolPaneOutput(hstring paneId, hstring source, int32_t maxLines)
+    IAsyncOperation<Protocol::PaneOutput> TerminalPage::ReadProtocolPaneOutput(uint32_t paneId, hstring source, int32_t maxLines)
     {
         auto strong = get_strong();
-        // Parse params before switching to UI thread.
-        const auto paneIdVal = static_cast<uint32_t>(std::stoul(winrt::to_string(paneId)));
         const auto sourceStr = winrt::to_string(source);
         const auto effectiveMaxLines = (maxLines <= 0) ? 200 : maxLines;
 
@@ -221,9 +216,9 @@ namespace winrt::TerminalApp::implementation
         // UI-thread work: find pane, read buffer.
         hstring fullBuffer;
         int32_t viewHeight = 0;
-        for (uint32_t tabIdx = 0; tabIdx < _tabs.Size(); ++tabIdx)
+        for (const auto& tab : _tabs)
         {
-            const auto tabImpl = _GetTabImpl(_tabs.GetAt(tabIdx));
+            const auto tabImpl = _GetTabImpl(tab);
             if (!tabImpl)
                 continue;
 
@@ -231,13 +226,13 @@ namespace winrt::TerminalApp::implementation
             if (!rootPane)
                 continue;
 
-            const auto foundPane = rootPane->FindPaneByContentId(paneIdVal);
+            const auto foundPane = rootPane->FindPaneByContentId(paneId);
             if (!foundPane)
                 continue;
 
             const auto termControl = foundPane->GetTerminalControl();
             if (!termControl)
-                co_return result; // empty PaneId signals not-ready
+                co_return result; // PaneId == 0 signals not-ready
 
             try
             {
@@ -246,14 +241,14 @@ namespace winrt::TerminalApp::implementation
             }
             catch (...)
             {
-                co_return result; // empty PaneId signals error
+                co_return result; // PaneId == 0 signals error
             }
 
             result.PaneId = paneId;
             break;
         }
 
-        if (result.PaneId.empty())
+        if (result.PaneId == 0)
             co_return result; // not found
 
         // Move off UI thread for string processing.
@@ -313,18 +308,17 @@ namespace winrt::TerminalApp::implementation
         co_return result;
     }
 
-    IAsyncOperation<Protocol::ProcessStatus> TerminalPage::GetProtocolProcessStatus(hstring paneId)
+    IAsyncOperation<Protocol::ProcessStatus> TerminalPage::GetProtocolProcessStatus(uint32_t paneId)
     {
         auto strong = get_strong();
-        const auto paneIdVal = static_cast<uint32_t>(std::stoul(winrt::to_string(paneId)));
 
         co_await wil::resume_foreground(Dispatcher());
 
         Protocol::ProcessStatus result{};
 
-        for (uint32_t tabIdx = 0; tabIdx < _tabs.Size(); ++tabIdx)
+        for (const auto& tab : _tabs)
         {
-            const auto tabImpl = _GetTabImpl(_tabs.GetAt(tabIdx));
+            const auto tabImpl = _GetTabImpl(tab);
             if (!tabImpl)
                 continue;
 
@@ -332,7 +326,7 @@ namespace winrt::TerminalApp::implementation
             if (!rootPane)
                 continue;
 
-            const auto foundPane = rootPane->FindPaneByContentId(paneIdVal);
+            const auto foundPane = rootPane->FindPaneByContentId(paneId);
             if (!foundPane)
                 continue;
 
@@ -387,18 +381,17 @@ namespace winrt::TerminalApp::implementation
         co_return result; // empty PaneId = not found
     }
 
-    IAsyncOperation<Protocol::SessionVariable> TerminalPage::GetProtocolSessionVariable(hstring paneId, hstring name)
+    IAsyncOperation<Protocol::SessionVariable> TerminalPage::GetProtocolSessionVariable(uint32_t paneId, hstring name)
     {
         auto strong = get_strong();
-        const auto paneIdVal = static_cast<uint32_t>(std::stoul(winrt::to_string(paneId)));
 
         co_await wil::resume_foreground(Dispatcher());
 
         Protocol::SessionVariable result{};
 
-        for (uint32_t tabIdx = 0; tabIdx < _tabs.Size(); ++tabIdx)
+        for (const auto& tab : _tabs)
         {
-            const auto tabImpl = _GetTabImpl(_tabs.GetAt(tabIdx));
+            const auto tabImpl = _GetTabImpl(tab);
             if (!tabImpl)
                 continue;
 
@@ -406,7 +399,7 @@ namespace winrt::TerminalApp::implementation
             if (!rootPane)
                 continue;
 
-            const auto foundPane = rootPane->FindPaneByContentId(paneIdVal);
+            const auto foundPane = rootPane->FindPaneByContentId(paneId);
             if (!foundPane)
                 continue;
 
@@ -435,16 +428,15 @@ namespace winrt::TerminalApp::implementation
     // Mutations — return typed structs or bool
     // ============================================================================
 
-    IAsyncOperation<bool> TerminalPage::SetProtocolSessionVariable(hstring paneId, hstring name, hstring value)
+    IAsyncOperation<bool> TerminalPage::SetProtocolSessionVariable(uint32_t paneId, hstring name, hstring value)
     {
         auto strong = get_strong();
-        const auto paneIdVal = static_cast<uint32_t>(std::stoul(winrt::to_string(paneId)));
 
         co_await wil::resume_foreground(Dispatcher());
 
-        for (uint32_t tabIdx = 0; tabIdx < _tabs.Size(); ++tabIdx)
+        for (const auto& tab : _tabs)
         {
-            const auto tabImpl = _GetTabImpl(_tabs.GetAt(tabIdx));
+            const auto tabImpl = _GetTabImpl(tab);
             if (!tabImpl)
                 continue;
 
@@ -452,7 +444,7 @@ namespace winrt::TerminalApp::implementation
             if (!rootPane)
                 continue;
 
-            const auto foundPane = rootPane->FindPaneByContentId(paneIdVal);
+            const auto foundPane = rootPane->FindPaneByContentId(paneId);
             if (!foundPane)
                 continue;
 
@@ -487,14 +479,14 @@ namespace winrt::TerminalApp::implementation
         const auto newTab = _tabs.GetAt(newTabIdx);
         const auto tabImpl = _GetTabImpl(newTab);
 
-        result.TabId = winrt::to_hstring(std::to_string(newTabIdx));
+        result.TabId = newTabIdx;
 
         if (tabImpl)
         {
             const auto rootPane = tabImpl->GetRootPane();
             if (rootPane)
             {
-                result.PaneId = winrt::to_hstring(std::to_string(rootPane->ContentId().value()));
+                result.PaneId = rootPane->ContentId().value();
                 result.Pid = _getPidFromPane(rootPane);
             }
         }
@@ -502,10 +494,9 @@ namespace winrt::TerminalApp::implementation
         co_return result;
     }
 
-    IAsyncOperation<Protocol::TabCreationResult> TerminalPage::SplitProtocolPane(hstring paneId, SplitDirection direction, float size, NewTerminalArgs args, bool background)
+    IAsyncOperation<Protocol::TabCreationResult> TerminalPage::SplitProtocolPane(uint32_t paneId, SplitDirection direction, float size, NewTerminalArgs args, bool background)
     {
         auto strong = get_strong();
-        const auto paneIdVal = static_cast<uint32_t>(std::stoul(winrt::to_string(paneId)));
 
         co_await wil::resume_foreground(Dispatcher());
 
@@ -522,7 +513,7 @@ namespace winrt::TerminalApp::implementation
             if (!rootPane)
                 continue;
 
-            const auto foundPane = rootPane->FindPaneByContentId(paneIdVal);
+            const auto foundPane = rootPane->FindPaneByContentId(paneId);
             if (!foundPane)
                 continue;
 
@@ -542,8 +533,8 @@ namespace winrt::TerminalApp::implementation
             _SplitPane(tabImpl, direction, size, std::move(newPane), /*focusNewPane=*/!background);
             _tabContent.UpdateLayout(); // Force synchronous terminal initialization
 
-            result.TabId = winrt::to_hstring(std::to_string(tabIdx));
-            result.PaneId = winrt::to_hstring(std::to_string(newPaneContentId));
+            result.TabId = tabIdx;
+            result.PaneId = newPaneContentId;
             result.Pid = newPanePid;
             co_return result;
         }
@@ -551,16 +542,15 @@ namespace winrt::TerminalApp::implementation
         co_return result;
     }
 
-    IAsyncOperation<bool> TerminalPage::CloseProtocolPane(hstring paneId)
+    IAsyncOperation<bool> TerminalPage::CloseProtocolPane(uint32_t paneId)
     {
         auto strong = get_strong();
-        const auto paneIdVal = static_cast<uint32_t>(std::stoul(winrt::to_string(paneId)));
 
         co_await wil::resume_foreground(Dispatcher());
 
-        for (uint32_t tabIdx = 0; tabIdx < _tabs.Size(); ++tabIdx)
+        for (const auto& tab : _tabs)
         {
-            const auto tabImpl = _GetTabImpl(_tabs.GetAt(tabIdx));
+            const auto tabImpl = _GetTabImpl(tab);
             if (!tabImpl)
                 continue;
 
@@ -568,7 +558,7 @@ namespace winrt::TerminalApp::implementation
             if (!rootPane)
                 continue;
 
-            const auto foundPane = rootPane->FindPaneByContentId(paneIdVal);
+            const auto foundPane = rootPane->FindPaneByContentId(paneId);
             if (!foundPane)
                 continue;
 
@@ -579,10 +569,9 @@ namespace winrt::TerminalApp::implementation
         co_return false;
     }
 
-    IAsyncOperation<bool> TerminalPage::SendProtocolInput(hstring paneId, hstring text)
+    IAsyncOperation<bool> TerminalPage::SendProtocolInput(uint32_t paneId, hstring text)
     {
         auto strong = get_strong();
-        const auto paneIdVal = static_cast<uint32_t>(std::stoul(winrt::to_string(paneId)));
         // Replace \n with \r — shells expect carriage return (Enter key)
         // rather than line feed to execute commands.
         std::wstring input{ text };
@@ -590,9 +579,9 @@ namespace winrt::TerminalApp::implementation
 
         co_await wil::resume_foreground(Dispatcher());
 
-        for (uint32_t tabIdx = 0; tabIdx < _tabs.Size(); ++tabIdx)
+        for (const auto& tab : _tabs)
         {
-            const auto tabImpl = _GetTabImpl(_tabs.GetAt(tabIdx));
+            const auto tabImpl = _GetTabImpl(tab);
             if (!tabImpl)
                 continue;
 
@@ -600,7 +589,7 @@ namespace winrt::TerminalApp::implementation
             if (!rootPane)
                 continue;
 
-            const auto foundPane = rootPane->FindPaneByContentId(paneIdVal);
+            const auto foundPane = rootPane->FindPaneByContentId(paneId);
             if (!foundPane)
                 continue;
 

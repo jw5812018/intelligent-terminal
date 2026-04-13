@@ -58,32 +58,32 @@ TerminalProtocolComServer : winrt::implements<TerminalProtocolComServer, Protoco
     winrt::hstring GetCapabilities();
     Protocol::PaneInfo GetActivePane();
     winrt::com_array<Protocol::WindowInfo> ListWindows();
-    winrt::com_array<Protocol::TabInfo> ListTabs(winrt::hstring const& windowIdFilter);
-    winrt::com_array<Protocol::PaneInfo> ListPanes(winrt::hstring const& windowIdFilter,
-                                                    winrt::hstring const& tabIdFilter);
-    Protocol::PaneOutput ReadPaneOutput(winrt::hstring const& paneId,
+    winrt::com_array<Protocol::TabInfo> ListTabs(uint64_t windowIdFilter);
+    winrt::com_array<Protocol::PaneInfo> ListPanes(uint64_t windowIdFilter,
+                                                    uint32_t tabIdFilter);
+    Protocol::PaneOutput ReadPaneOutput(uint32_t paneId,
                                          winrt::hstring const& source,
                                          int32_t maxLines);
-    Protocol::ProcessStatus GetProcessStatus(winrt::hstring const& paneId);
-    Protocol::SessionVariable GetSessionVariable(winrt::hstring const& paneId,
+    Protocol::ProcessStatus GetProcessStatus(uint32_t paneId);
+    Protocol::SessionVariable GetSessionVariable(uint32_t paneId,
                                                    winrt::hstring const& name);
     winrt::hstring GetSettings();
 
-    Protocol::TabCreationResult CreateTab(winrt::hstring const& windowId,
+    Protocol::TabCreationResult CreateTab(uint64_t windowId,
                                            winrt::hstring const& profile,
                                            winrt::hstring const& commandline,
                                            winrt::hstring const& title,
                                            bool suppressAppTitle,
                                            bool background);
-    Protocol::TabCreationResult SplitPane(winrt::hstring const& paneId,
+    Protocol::TabCreationResult SplitPane(uint32_t paneId,
                                            winrt::hstring const& direction,
                                            float size,
                                            winrt::hstring const& profile,
                                            winrt::hstring const& commandline,
                                            bool background);
-    void ClosePane(winrt::hstring const& paneId);
-    void SendInput(winrt::hstring const& paneId, winrt::hstring const& text);
-    void SetSessionVariable(winrt::hstring const& paneId,
+    void ClosePane(uint32_t paneId);
+    void SendInput(uint32_t paneId, winrt::hstring const& text);
+    void SetSessionVariable(uint32_t paneId,
                             winrt::hstring const& name,
                             winrt::hstring const& value);
     winrt::hstring SetSettings(winrt::hstring const& settingsContent);

@@ -7,7 +7,7 @@ namespace Microsoft.Terminal.Protocol
 {
     struct WindowInfo
     {
-        String WindowId;
+        UInt64 WindowId;
         String Title;
         Boolean IsFocused;
         UInt32 TabCount;
@@ -15,8 +15,8 @@ namespace Microsoft.Terminal.Protocol
 
     struct TabInfo
     {
-        String TabId;
-        String WindowId;
+        UInt32 TabId;
+        UInt64 WindowId;
         String Title;
         Boolean IsActive;
         UInt32 PaneCount;
@@ -24,9 +24,9 @@ namespace Microsoft.Terminal.Protocol
 
     struct PaneInfo
     {
-        String PaneId;
-        String TabId;
-        String WindowId;
+        UInt32 PaneId;
+        UInt32 TabId;
+        UInt64 WindowId;
         String Title;
         String Profile;
         Boolean IsActive;
@@ -37,7 +37,7 @@ namespace Microsoft.Terminal.Protocol
 
     struct PaneOutput
     {
-        String PaneId;
+        UInt32 PaneId;
         String Content;
         Int32 LineCount;
         Boolean Truncated;
@@ -45,7 +45,7 @@ namespace Microsoft.Terminal.Protocol
 
     struct ProcessStatus
     {
-        String PaneId;
+        UInt32 PaneId;
         String State;
         UInt32 Pid;
         Int32 ExitCode;
@@ -54,7 +54,7 @@ namespace Microsoft.Terminal.Protocol
 
     struct SessionVariable
     {
-        String PaneId;
+        UInt32 PaneId;
         String Name;
         String Value;
         Boolean Exists;
@@ -62,9 +62,9 @@ namespace Microsoft.Terminal.Protocol
 
     struct TabCreationResult
     {
-        String TabId;
-        String PaneId;
-        String WindowId;
+        UInt32 TabId;
+        UInt32 PaneId;
+        UInt64 WindowId;
         UInt32 Pid;
     };
 
@@ -99,19 +99,19 @@ namespace Microsoft.Terminal.Protocol
         // Queries
         PaneInfo GetActivePane();
         WindowInfo[] ListWindows();
-        TabInfo[] ListTabs(String windowIdFilter);
-        PaneInfo[] ListPanes(String windowIdFilter, String tabIdFilter);
-        PaneOutput ReadPaneOutput(String paneId, String source, Int32 maxLines);
-        ProcessStatus GetProcessStatus(String paneId);
-        SessionVariable GetSessionVariable(String paneId, String name);
+        TabInfo[] ListTabs(UInt64 windowIdFilter);
+        PaneInfo[] ListPanes(UInt64 windowIdFilter, UInt32 tabIdFilter);
+        PaneOutput ReadPaneOutput(UInt32 paneId, String source, Int32 maxLines);
+        ProcessStatus GetProcessStatus(UInt32 paneId);
+        SessionVariable GetSessionVariable(UInt32 paneId, String name);
         String GetSettings();
 
         // Mutations
-        TabCreationResult CreateTab(String windowId, String profile, String commandline, String title, Boolean suppressAppTitle, Boolean background);
-        TabCreationResult SplitPane(String paneId, String direction, Single size, String profile, String commandline, Boolean background);
-        void ClosePane(String paneId);
-        void SendInput(String paneId, String text);
-        void SetSessionVariable(String paneId, String name, String value);
+        TabCreationResult CreateTab(UInt64 windowId, String profile, String commandline, String title, Boolean suppressAppTitle, Boolean background);
+        TabCreationResult SplitPane(UInt32 paneId, String direction, Single size, String profile, String commandline, Boolean background);
+        void ClosePane(UInt32 paneId);
+        void SendInput(UInt32 paneId, String text);
+        void SetSessionVariable(UInt32 paneId, String name, String value);
         String SetSettings(String settingsContent);
 
         // Interactive

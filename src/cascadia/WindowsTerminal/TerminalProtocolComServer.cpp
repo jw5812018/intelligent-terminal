@@ -204,11 +204,11 @@ Protocol::PaneInfo TerminalProtocolComServer::GetActivePane()
     THROW_HR_IF(E_FAIL, !page);
 
     auto info = page.GetProtocolActivePane().get();
-    THROW_HR_IF(E_FAIL, info.PaneId.empty());
+    THROW_HR_IF(E_FAIL, info.PaneId == 0);
 
     // TerminalPage doesn't know the window ID — fill it in here.
     const auto& props = host->Logic().WindowProperties();
-    info.WindowId = winrt::to_hstring(std::to_string(props.WindowId()));
+    info.WindowId = props.WindowId();
 
     return info;
 }
@@ -229,7 +229,7 @@ winrt::com_array<Protocol::WindowInfo> TerminalProtocolComServer::ListWindows()
         const auto& props = logic.WindowProperties();
 
         Protocol::WindowInfo info{};
-        info.WindowId = winrt::to_hstring(std::to_string(props.WindowId()));
+        info.WindowId = props.WindowId();
         info.Title = props.WindowNameForDisplay();
         info.IsFocused = (host.get() == mostRecent);
         info.TabCount = logic.TabCount();
@@ -300,11 +300,10 @@ winrt::hstring TerminalProtocolComServer::GetCapabilities()
 // ============================================================================
 
 winrt::com_array<Protocol::TabInfo> TerminalProtocolComServer::ListTabs(
-    winrt::hstring const& windowIdFilter)
+    uint64_t windowIdFilter)
 {
     THROW_HR_IF(E_NOT_VALID_STATE, !s_emperor);
 
-    const auto filter = winrt::to_string(windowIdFilter);
     std::vector<Protocol::TabInfo> items;
 
     for (const auto& host : s_emperor->GetWindows())
@@ -314,20 +313,19 @@ winrt::com_array<Protocol::TabInfo> TerminalProtocolComServer::ListTabs(
             continue;
 
         const auto& props = logic.WindowProperties();
-        const auto windowIdStr = std::to_string(props.WindowId());
-        if (!filter.empty() && windowIdStr != filter)
+        if (windowIdFilter != 0 && props.WindowId() != windowIdFilter)
             continue;
 
         const auto page = _getPage(host.get());
         if (!page)
             continue;
 
-        const auto windowIdHstr = winrt::to_hstring(windowIdStr);
+        const auto windowId = props.WindowId();
         const auto tabs = page.GetProtocolTabs().get();
         for (uint32_t i = 0; i < tabs.Size(); ++i)
         {
             auto t = tabs.GetAt(i);
-            t.WindowId = windowIdHstr;
+            t.WindowId = windowId;
             items.push_back(std::move(t));
         }
     }
@@ -336,12 +334,11 @@ winrt::com_array<Protocol::TabInfo> TerminalProtocolComServer::ListTabs(
 }
 
 winrt::com_array<Protocol::PaneInfo> TerminalProtocolComServer::ListPanes(
-    winrt::hstring const& windowIdFilter,
-    winrt::hstring const& tabIdFilter)
+    uint64_t windowIdFilter,
+    uint32_t tabIdFilter)
 {
     THROW_HR_IF(E_NOT_VALID_STATE, !s_emperor);
 
-    const auto winFilter = winrt::to_string(windowIdFilter);
     std::vector<Protocol::PaneInfo> items;
 
     for (const auto& host : s_emperor->GetWindows())
@@ -351,20 +348,19 @@ winrt::com_array<Protocol::PaneInfo> TerminalProtocolComServer::ListPanes(
             continue;
 
         const auto& props = logic.WindowProperties();
-        const auto windowIdStr = std::to_string(props.WindowId());
-        if (!winFilter.empty() && windowIdStr != winFilter)
+        if (windowIdFilter != 0 && props.WindowId() != windowIdFilter)
             continue;
 
         const auto page = _getPage(host.get());
         if (!page)
             continue;
 
-        const auto windowIdHstr = winrt::to_hstring(windowIdStr);
+        const auto windowId = props.WindowId();
         const auto panes = page.GetProtocolPanes(tabIdFilter).get();
         for (uint32_t i = 0; i < panes.Size(); ++i)
         {
             auto p = panes.GetAt(i);
-            p.WindowId = windowIdHstr;
+            p.WindowId = windowId;
             items.push_back(std::move(p));
         }
     }
@@ -373,7 +369,7 @@ winrt::com_array<Protocol::PaneInfo> TerminalProtocolComServer::ListPanes(
 }
 
 Protocol::PaneOutput TerminalProtocolComServer::ReadPaneOutput(
-    winrt::hstring const& paneId,
+    uint32_t paneId,
     winrt::hstring const& source,
     int32_t maxLines)
 {
@@ -388,7 +384,7 @@ Protocol::PaneOutput TerminalProtocolComServer::ReadPaneOutput(
             continue;
 
         auto info = page.ReadProtocolPaneOutput(paneId, effectiveSource, maxLines).get();
-        if (!info.PaneId.empty())
+        if (info.PaneId != 0)
             return info;
     }
 
@@ -396,7 +392,7 @@ Protocol::PaneOutput TerminalProtocolComServer::ReadPaneOutput(
 }
 
 Protocol::ProcessStatus TerminalProtocolComServer::GetProcessStatus(
-    winrt::hstring const& paneId)
+    uint32_t paneId)
 {
     THROW_HR_IF(E_NOT_VALID_STATE, !s_emperor);
 
@@ -407,7 +403,7 @@ Protocol::ProcessStatus TerminalProtocolComServer::GetProcessStatus(
             continue;
 
         auto info = page.GetProtocolProcessStatus(paneId).get();
-        if (!info.PaneId.empty())
+        if (info.PaneId != 0)
             return info;
     }
 
@@ -415,7 +411,7 @@ Protocol::ProcessStatus TerminalProtocolComServer::GetProcessStatus(
 }
 
 Protocol::SessionVariable TerminalProtocolComServer::GetSessionVariable(
-    winrt::hstring const& paneId,
+    uint32_t paneId,
     winrt::hstring const& name)
 {
     THROW_HR_IF(E_NOT_VALID_STATE, !s_emperor);
@@ -427,7 +423,7 @@ Protocol::SessionVariable TerminalProtocolComServer::GetSessionVariable(
             continue;
 
         auto info = page.GetProtocolSessionVariable(paneId, name).get();
-        if (!info.PaneId.empty())
+        if (info.PaneId != 0)
             return info;
     }
 
@@ -447,7 +443,7 @@ winrt::hstring TerminalProtocolComServer::GetSettings()
 // ============================================================================
 
 Protocol::TabCreationResult TerminalProtocolComServer::CreateTab(
-    winrt::hstring const& windowId,
+    uint64_t windowId,
     winrt::hstring const& profile,
     winrt::hstring const& commandline,
     winrt::hstring const& title,
@@ -458,9 +454,9 @@ Protocol::TabCreationResult TerminalProtocolComServer::CreateTab(
 
     // Find target window.
     AppHost* targetHost = nullptr;
-    if (!windowId.empty())
+    if (windowId != 0)
     {
-        targetHost = s_emperor->GetWindowById(std::stoull(winrt::to_string(windowId)));
+        targetHost = s_emperor->GetWindowById(windowId);
     }
     else
     {
@@ -485,15 +481,15 @@ Protocol::TabCreationResult TerminalProtocolComServer::CreateTab(
     }
 
     auto cr = page.CreateProtocolTab(newTermArgs, background).get();
-    THROW_HR_IF(E_FAIL, cr.TabId.empty());
+    THROW_HR_IF(E_FAIL, cr.PaneId == 0);
 
     const auto& props = targetHost->Logic().WindowProperties();
-    cr.WindowId = winrt::to_hstring(std::to_string(props.WindowId()));
+    cr.WindowId = props.WindowId();
     return cr;
 }
 
 Protocol::TabCreationResult TerminalProtocolComServer::SplitPane(
-    winrt::hstring const& paneId,
+    uint32_t paneId,
     winrt::hstring const& direction,
     float size,
     winrt::hstring const& profile,
@@ -501,7 +497,7 @@ Protocol::TabCreationResult TerminalProtocolComServer::SplitPane(
     bool background)
 {
     THROW_HR_IF(E_NOT_VALID_STATE, !s_emperor);
-    THROW_HR_IF(E_INVALIDARG, paneId.empty());
+    THROW_HR_IF(E_INVALIDARG, paneId == 0);
 
     // Map direction string to SplitDirection enum.
     auto splitDir = winrt::Microsoft::Terminal::Settings::Model::SplitDirection::Right;
@@ -530,21 +526,21 @@ Protocol::TabCreationResult TerminalProtocolComServer::SplitPane(
             continue;
 
         auto cr = page.SplitProtocolPane(paneId, splitDir, size, newTermArgs, background).get();
-        if (cr.TabId.empty())
+        if (cr.PaneId == 0)
             continue; // pane not in this window
 
         const auto& props = host->Logic().WindowProperties();
-        cr.WindowId = winrt::to_hstring(std::to_string(props.WindowId()));
+        cr.WindowId = props.WindowId();
         return cr;
     }
 
     winrt::throw_hresult(E_FAIL);
 }
 
-void TerminalProtocolComServer::ClosePane(winrt::hstring const& paneId)
+void TerminalProtocolComServer::ClosePane(uint32_t paneId)
 {
     THROW_HR_IF(E_NOT_VALID_STATE, !s_emperor);
-    THROW_HR_IF(E_INVALIDARG, paneId.empty());
+    THROW_HR_IF(E_INVALIDARG, paneId == 0);
 
     for (const auto& host : s_emperor->GetWindows())
     {
@@ -560,11 +556,11 @@ void TerminalProtocolComServer::ClosePane(winrt::hstring const& paneId)
 }
 
 void TerminalProtocolComServer::SendInput(
-    winrt::hstring const& paneId,
+    uint32_t paneId,
     winrt::hstring const& text)
 {
     THROW_HR_IF(E_NOT_VALID_STATE, !s_emperor);
-    THROW_HR_IF(E_INVALIDARG, paneId.empty());
+    THROW_HR_IF(E_INVALIDARG, paneId == 0);
     THROW_HR_IF(E_INVALIDARG, text.empty());
 
     for (const auto& host : s_emperor->GetWindows())
@@ -581,12 +577,12 @@ void TerminalProtocolComServer::SendInput(
 }
 
 void TerminalProtocolComServer::SetSessionVariable(
-    winrt::hstring const& paneId,
+    uint32_t paneId,
     winrt::hstring const& name,
     winrt::hstring const& value)
 {
     THROW_HR_IF(E_NOT_VALID_STATE, !s_emperor);
-    THROW_HR_IF(E_INVALIDARG, paneId.empty());
+    THROW_HR_IF(E_INVALIDARG, paneId == 0);
     THROW_HR_IF(E_INVALIDARG, name.empty());
 
     for (const auto& host : s_emperor->GetWindows())

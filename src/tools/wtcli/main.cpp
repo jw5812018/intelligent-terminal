@@ -73,28 +73,28 @@ static Protocol::IProtocolServer ConnectToTerminal(Protocol::AuthResult* outAuth
     }
 }
 
-static winrt::hstring ResolvePaneId(const Protocol::IProtocolServer& server, const std::string& target)
+static uint32_t ResolvePaneId(const Protocol::IProtocolServer& server, const std::string& target)
 {
     if (!target.empty())
-        return winrt::to_hstring(target);
+        return static_cast<uint32_t>(std::stoul(target));
     auto info = server.GetActivePane();
     return info.PaneId;
 }
 
-static winrt::hstring GetFirstWindowId(const Protocol::IProtocolServer& server)
+static uint64_t GetFirstWindowId(const Protocol::IProtocolServer& server)
 {
     auto windows = server.ListWindows();
     if (windows.size() > 0)
         return windows[0].WindowId;
-    return {};
+    return 0;
 }
 
-static winrt::hstring GetFirstTabId(const Protocol::IProtocolServer& server, const winrt::hstring& windowId)
+static uint32_t GetFirstTabId(const Protocol::IProtocolServer& server, uint64_t windowId)
 {
     auto tabs = server.ListTabs(windowId);
     if (tabs.size() > 0)
         return tabs[0].TabId;
-    return {};
+    return UINT32_MAX;
 }
 
 // Translate tmux-style key names to actual characters.
@@ -188,7 +188,7 @@ int main()
         if (!server) return;
         try
         {
-            auto wid = listTabsWindowId.empty() ? GetFirstWindowId(server) : winrt::to_hstring(listTabsWindowId);
+            uint64_t wid = listTabsWindowId.empty() ? GetFirstWindowId(server) : std::stoull(listTabsWindowId);
             auto tabs = server.ListTabs(wid);
             if (jsonMode)
             {
@@ -220,11 +220,11 @@ int main()
         if (!server) return;
         try
         {
-            auto wid = listPanesWindowId.empty() ? winrt::hstring{} : winrt::to_hstring(listPanesWindowId);
-            auto tid = listPanesTabId.empty() ? winrt::hstring{} : winrt::to_hstring(listPanesTabId);
-            if (tid.empty())
+            uint64_t wid = listPanesWindowId.empty() ? 0 : std::stoull(listPanesWindowId);
+            uint32_t tid = listPanesTabId.empty() ? UINT32_MAX : static_cast<uint32_t>(std::stoul(listPanesTabId));
+            if (tid == UINT32_MAX)
             {
-                if (wid.empty()) wid = GetFirstWindowId(server);
+                if (wid == 0) wid = GetFirstWindowId(server);
                 tid = GetFirstTabId(server, wid);
             }
             auto panes = server.ListPanes(wid, tid);
@@ -312,7 +312,7 @@ int main()
             if (jsonMode)
             {
                 Json::Value v;
-                v["pane_id"] = winrt::to_string(status.PaneId);
+                v["pane_id"] = static_cast<Json::UInt>(status.PaneId);
                 v["state"] = winrt::to_string(status.State);
                 v["pid"] = static_cast<Json::UInt>(status.Pid);
                 if (status.HasExitCode) v["exit_code"] = status.ExitCode;
@@ -363,7 +363,7 @@ int main()
         try
         {
             auto result = server.CreateTab(
-                L"", L"",
+                0, L"",
                 winrt::to_hstring(newTabCommand),
                 winrt::to_hstring(newTabTitle),
                 false, true);
@@ -394,7 +394,7 @@ int main()
         if (!server) return;
         try
         {
-            auto paneId = ResolvePaneId(server, splitPaneTarget);
+            uint32_t paneId = ResolvePaneId(server, splitPaneTarget);
             winrt::hstring dir = splitHorizontal ? L"horizontal" : (splitVertical ? L"vertical" : L"automatic");
             auto result = server.SplitPane(
                 paneId, dir, static_cast<float>(splitSize),
@@ -422,7 +422,7 @@ int main()
         {
             auto paneId = ResolvePaneId(server, killPaneTarget);
             server.ClosePane(paneId);
-            if (!jsonMode) printf("Pane %s closed.\n", winrt::to_string(paneId).c_str());
+            if (!jsonMode) printf("Pane %u closed.\n", paneId);
         }
         catch (const winrt::hresult_error& e)
         {
@@ -528,7 +528,7 @@ int main()
     waitForCmd->callback([&]() {
         auto server = connect();
         if (!server) return;
-        auto paneId = winrt::to_hstring(waitForTarget);
+        uint32_t paneId = static_cast<uint32_t>(std::stoul(waitForTarget));
         auto start = std::chrono::steady_clock::now();
 
         while (true)
