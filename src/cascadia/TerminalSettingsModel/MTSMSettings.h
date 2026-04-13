@@ -72,8 +72,6 @@ Author(s):
     X(bool, AllowHeadless, "compatibility.allowHeadless", false)                                                                                                                                      \
     X(hstring, SearchWebDefaultQueryUrl, "searchWebDefaultQueryUrl", L"https://www.bing.com/search?q=%22%s%22")                                                                                       \
     X(bool, ShowTabsFullscreen, "showTabsFullscreen", false)                                                                                                                                            \
-    X(hstring, AgentCliPath, "agentCliPath", L"")                                                                                                                                                       \
-    X(hstring, DelegateAgentCliPath, "delegateAgentCliPath", L"")                                                                                                                                       \
     X(hstring, AcpAgent, "acpAgent", L"copilot")                                                                                                                                                        \
     X(hstring, AcpModel, "acpModel", L"")                                                                                                                                                               \
     X(hstring, DelegateAgent, "delegateAgent", L"copilot")                                                                                                                                              \

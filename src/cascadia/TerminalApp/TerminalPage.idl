@@ -42,9 +42,6 @@ namespace TerminalApp
 
         String VirtualWorkingDirectory { get; set; };
         String VirtualEnvVars { get; set; };
-        String ProtocolPipeName { get; set; };
-        String McpToken { get; set; };
-
         Boolean IsQuakeWindow();
     };
 

@@ -344,6 +344,12 @@ int main()
             auto paneId = ResolvePaneId(server, sendKeysTarget);
             auto text = TranslateKeys(sendKeysArgs);
             server.SendInput(paneId, text);
+            if (jsonMode)
+            {
+                Json::Value v;
+                v["ok"] = true;
+                PrintJson(v);
+            }
         }
         catch (const winrt::hresult_error& e)
         {
@@ -422,7 +428,17 @@ int main()
         {
             auto paneId = ResolvePaneId(server, killPaneTarget);
             server.ClosePane(paneId);
-            if (!jsonMode) printf("Pane %u closed.\n", paneId);
+            if (jsonMode)
+            {
+                Json::Value v;
+                v["ok"] = true;
+                v["pane_id"] = static_cast<Json::UInt>(paneId);
+                PrintJson(v);
+            }
+            else
+            {
+                printf("Pane %u closed.\n", paneId);
+            }
         }
         catch (const winrt::hresult_error& e)
         {
@@ -471,50 +487,71 @@ int main()
     // ── info ──
     auto* infoCmd = app.add_subcommand("info", "Show connection info");
     infoCmd->callback([&]() {
-        printf("Windows Terminal Protocol Info\n");
-        printf("========================================\n");
-
         wchar_t clsid[128]{};
-        if (GetEnvironmentVariableW(L"WT_COM_CLSID", clsid, ARRAYSIZE(clsid)))
-            printf("  COM CLSID:  %ls\n", clsid);
-        else
-            printf("  COM CLSID:  (not set)\n");
-
-        printf("\n");
+        auto hasClsid = GetEnvironmentVariableW(L"WT_COM_CLSID", clsid, ARRAYSIZE(clsid)) > 0;
 
         Protocol::AuthResult authResult{};
         auto server = ConnectToTerminal(&authResult);
-        if (!server)
+        auto version = server ? winrt::to_string(authResult.ProtocolVersion) : std::string{};
+
+        Json::Value methods(Json::arrayValue);
+        if (server)
         {
-            printf("  Connection: FAILED\n");
-            exitCode = 1;
-            return;
-        }
-        printf("  Connection: OK\n");
-
-        auto version = winrt::to_string(authResult.ProtocolVersion);
-        if (!version.empty())
-            printf("  Protocol:   %s\n", version.c_str());
-
-        printf("\n");
-
-        try
-        {
-            auto capsJson = server.GetCapabilities();
-            // GetCapabilities returns a JSON array of supported method names
-            Json::Value cap;
-            Json::CharReaderBuilder rb;
-            std::string errs;
-            auto capsStr = winrt::to_string(capsJson);
-            std::istringstream ss(capsStr);
-            if (Json::parseFromStream(rb, ss, &cap, &errs) && cap.isArray())
+            try
             {
-                printf("  Methods:    %u supported\n", cap.size());
-                for (const auto& m : cap)
-                    printf("              - %s\n", m.asString().c_str());
+                auto capsJson = server.GetCapabilities();
+                Json::Value cap;
+                Json::CharReaderBuilder rb;
+                std::string errs;
+                auto capsStr = winrt::to_string(capsJson);
+                std::istringstream ss(capsStr);
+                if (Json::parseFromStream(rb, ss, &cap, &errs) && cap.isArray())
+                    methods = cap;
+            }
+            catch (const winrt::hresult_error&) {}
+        }
+
+        if (jsonMode)
+        {
+            Json::Value v;
+            if (hasClsid)
+                v["com_clsid"] = winrt::to_string(winrt::hstring{ clsid });
+            v["connected"] = (server != nullptr);
+            if (!version.empty())
+                v["protocol_version"] = version;
+            v["methods"] = methods;
+            PrintJson(v);
+        }
+        else
+        {
+            printf("Windows Terminal Protocol Info\n");
+            printf("========================================\n");
+            if (hasClsid)
+                printf("  COM CLSID:  %ls\n", clsid);
+            else
+                printf("  COM CLSID:  (not set)\n");
+            printf("\n");
+            if (!server)
+            {
+                printf("  Connection: FAILED\n");
+            }
+            else
+            {
+                printf("  Connection: OK\n");
+                if (!version.empty())
+                    printf("  Protocol:   %s\n", version.c_str());
+                printf("\n");
+                if (methods.size() > 0)
+                {
+                    printf("  Methods:    %u supported\n", methods.size());
+                    for (const auto& m : methods)
+                        printf("              - %s\n", m.asString().c_str());
+                }
             }
         }
-        catch (const winrt::hresult_error&) {}
+
+        if (!server)
+            exitCode = 1;
     });
 
     // ── wait-for ──

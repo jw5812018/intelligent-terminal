@@ -6,12 +6,63 @@ use tokio::sync::mpsc;
 use crate::app::DebugMessage;
 use super::WtChannel;
 
+/// Extract a JSON value as a string, handling both String and Number types.
+/// Protocol IDs may arrive as either strings or numbers depending on the caller.
+fn json_id_as_str(v: &serde_json::Value) -> Option<String> {
+    match v {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
+/// Resolve the full path to `wtcli.exe` at startup.
+fn resolve_wtcli_path() -> String {
+    // 1. Explicit override via environment variable.
+    if let Ok(p) = std::env::var("WT_WTCLI_PATH") {
+        if std::path::Path::new(&p).exists() {
+            return p;
+        }
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        // 2. Sibling of current exe (installed scenario: wta.exe and wtcli.exe co-located).
+        if let Some(dir) = exe.parent() {
+            let sibling = dir.join("wtcli.exe");
+            if sibling.exists() {
+                return sibling.to_string_lossy().to_string();
+            }
+        }
+
+        // 3. Walk up from exe to repo root, check bin/x64/{Debug,Release}/wtcli/wtcli.exe (dev builds).
+        //    The project output directory (wtcli/) contains the .winmd needed for MBM marshaling.
+        let mut cursor = exe.parent().map(|p| p.to_path_buf());
+        while let Some(dir) = cursor {
+            for sub in &["bin/x64/Debug/wtcli/wtcli.exe", "bin/x64/Release/wtcli/wtcli.exe"] {
+                let candidate = dir.join(sub);
+                if candidate.exists() {
+                    return candidate.to_string_lossy().to_string();
+                }
+            }
+            let parent = dir.parent().map(|p| p.to_path_buf());
+            if parent.as_deref() == Some(dir.as_path()) {
+                break;
+            }
+            cursor = parent;
+        }
+    }
+
+    // 4. Fall back to PATH search.
+    "wtcli".to_string()
+}
+
 /// Channel that invokes `wtcli.exe` for protocol operations.
 /// Replaces the old PipeChannel (named-pipe transport).
 pub struct CliChannel {
     available: AtomicBool,
     debug_tx: Option<mpsc::UnboundedSender<DebugMessage>>,
     event_tx: std::sync::Mutex<Option<mpsc::UnboundedSender<serde_json::Value>>>,
+    wtcli_path: String,
 }
 
 impl CliChannel {
@@ -25,6 +76,7 @@ impl CliChannel {
             available: AtomicBool::new(true),
             debug_tx: None,
             event_tx: std::sync::Mutex::new(None),
+            wtcli_path: resolve_wtcli_path(),
         })
     }
 
@@ -39,6 +91,7 @@ impl CliChannel {
             available: AtomicBool::new(true),
             debug_tx: None,
             event_tx: std::sync::Mutex::new(None),
+            wtcli_path: resolve_wtcli_path(),
         })
     }
 
@@ -55,10 +108,11 @@ impl CliChannel {
 
     /// Start background event listener (wraps `wtcli listen --json`).
     pub async fn start_reader(self: &std::sync::Arc<Self>) {
+        let wtcli = self.wtcli_path.clone();
         let weak = std::sync::Arc::downgrade(self);
         tokio::spawn(async move {
-            let Ok(mut child) = tokio::process::Command::new("wtcli")
-                .args(["listen", "--json"])
+            let Ok(mut child) = tokio::process::Command::new(&wtcli)
+                .args(["--json", "listen"])
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::null())
                 .spawn()
@@ -92,9 +146,9 @@ impl CliChannel {
 
     /// Run a wtcli subcommand and return the parsed JSON output.
     async fn run_wtcli(&self, args: &[&str]) -> anyhow::Result<serde_json::Value> {
-        let output = tokio::process::Command::new("wtcli")
-            .args(args)
+        let output = tokio::process::Command::new(&self.wtcli_path)
             .arg("--json")
+            .args(args)
             .output()
             .await
             .context("Failed to run wtcli")?;
@@ -105,7 +159,11 @@ impl CliChannel {
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let val: serde_json::Value = serde_json::from_str(stdout.trim())
+        let trimmed = stdout.trim();
+        if trimmed.is_empty() {
+            return Ok(serde_json::Value::Null);
+        }
+        let val: serde_json::Value = serde_json::from_str(trimmed)
             .context("Failed to parse wtcli JSON output")?;
         Ok(val)
     }
@@ -123,49 +181,41 @@ impl WtChannel for CliChannel {
             "list_windows" => self.run_wtcli(&["list-windows"]).await,
             "list_tabs" => {
                 let mut args = vec!["list-tabs"];
-                let wid = params.get("window_id").and_then(|v| v.as_str()).unwrap_or("");
-                let wid_owned;
+                let wid = params.get("window_id").and_then(json_id_as_str).unwrap_or_default();
                 if !wid.is_empty() {
-                    wid_owned = wid.to_string();
-                    args.extend(["-w", &wid_owned]);
+                    args.extend(["-w", &wid]);
                 }
                 self.run_wtcli(&args).await
             }
             "list_panes" => {
                 let mut args = vec!["list-panes"];
-                let wid = params.get("window_id").and_then(|v| v.as_str()).unwrap_or("");
-                let tid = params.get("tab_id").and_then(|v| v.as_str()).unwrap_or("");
-                let wid_owned;
-                let tid_owned;
+                let wid = params.get("window_id").and_then(json_id_as_str).unwrap_or_default();
+                let tid = params.get("tab_id").and_then(json_id_as_str).unwrap_or_default();
                 if !wid.is_empty() {
-                    wid_owned = wid.to_string();
-                    args.extend(["-w", &wid_owned]);
+                    args.extend(["-w", &wid]);
                 }
                 if !tid.is_empty() {
-                    tid_owned = tid.to_string();
-                    args.extend(["-t", &tid_owned]);
+                    args.extend(["-t", &tid]);
                 }
                 self.run_wtcli(&args).await
             }
             "get_active_pane" => self.run_wtcli(&["active-pane"]).await,
             "read_pane_output" => {
-                let pane_id = params.get("pane_id").and_then(|v| v.as_str()).unwrap_or("");
+                let pane_id = params.get("pane_id").and_then(json_id_as_str).unwrap_or_default();
                 let max_lines = params.get("max_lines").and_then(|v| v.as_i64()).unwrap_or(200);
-                let pane_owned = pane_id.to_string();
                 let lines_owned = max_lines.to_string();
                 let mut args = vec!["capture-pane"];
-                if !pane_owned.is_empty() {
-                    args.extend(["-t", &pane_owned]);
+                if !pane_id.is_empty() {
+                    args.extend(["-t", &pane_id]);
                 }
                 args.extend(["-l", &lines_owned]);
                 self.run_wtcli(&args).await
             }
             "get_process_status" => {
-                let pane_id = params.get("pane_id").and_then(|v| v.as_str()).unwrap_or("");
-                let pane_owned = pane_id.to_string();
+                let pane_id = params.get("pane_id").and_then(json_id_as_str).unwrap_or_default();
                 let mut args = vec!["pane-status"];
-                if !pane_owned.is_empty() {
-                    args.extend(["-t", &pane_owned]);
+                if !pane_id.is_empty() {
+                    args.extend(["-t", &pane_id]);
                 }
                 self.run_wtcli(&args).await
             }
@@ -186,14 +236,13 @@ impl WtChannel for CliChannel {
                 self.run_wtcli(&args).await
             }
             "split_pane" => {
-                let pane_id = params.get("pane_id").and_then(|v| v.as_str()).unwrap_or("");
+                let pane_id = params.get("pane_id").and_then(json_id_as_str).unwrap_or_default();
                 let cmd = params.get("commandline").and_then(|v| v.as_str()).unwrap_or("");
                 let dir = params.get("direction").and_then(|v| v.as_str()).unwrap_or("");
-                let pane_owned = pane_id.to_string();
                 let cmd_owned;
                 let mut args = vec!["split-pane"];
-                if !pane_owned.is_empty() {
-                    args.extend(["-t", &pane_owned]);
+                if !pane_id.is_empty() {
+                    args.extend(["-t", &pane_id]);
                 }
                 if dir == "horizontal" || dir == "down" || dir == "up" {
                     args.push("-H");
@@ -207,18 +256,16 @@ impl WtChannel for CliChannel {
                 self.run_wtcli(&args).await
             }
             "close_pane" => {
-                let pane_id = params.get("pane_id").and_then(|v| v.as_str()).unwrap_or("");
-                let pane_owned = pane_id.to_string();
-                self.run_wtcli(&["kill-pane", "-t", &pane_owned]).await
+                let pane_id = params.get("pane_id").and_then(json_id_as_str).unwrap_or_default();
+                self.run_wtcli(&["kill-pane", "-t", &pane_id]).await
             }
             "send_input" => {
-                let pane_id = params.get("pane_id").and_then(|v| v.as_str()).unwrap_or("");
+                let pane_id = params.get("pane_id").and_then(json_id_as_str).unwrap_or_default();
                 let text = params.get("text").and_then(|v| v.as_str()).unwrap_or("");
-                let pane_owned = pane_id.to_string();
                 let text_owned = text.to_string();
                 let mut args = vec!["send-keys"];
-                if !pane_owned.is_empty() {
-                    args.extend(["-t", &pane_owned]);
+                if !pane_id.is_empty() {
+                    args.extend(["-t", &pane_id]);
                 }
                 args.push(&text_owned);
                 self.run_wtcli(&args).await

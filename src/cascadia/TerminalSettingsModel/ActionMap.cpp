@@ -108,6 +108,7 @@ namespace winrt::Microsoft::Terminal::Settings::Model::implementation
                 { ShortcutAction::NewWindow, USES_RESOURCE(L"NewWindowCommandKey") },
                 { ShortcutAction::NextTab, USES_RESOURCE(L"NextTabCommandKey") },
                 { ShortcutAction::OpenAbout, USES_RESOURCE(L"OpenAboutCommandKey") },
+                { ShortcutAction::OpenAgentPane, USES_RESOURCE(L"OpenAgentPaneCommandKey") },
                 { ShortcutAction::OpenCWD, USES_RESOURCE(L"OpenCWDCommandKey") },
                 { ShortcutAction::OpenNewTabDropdown, USES_RESOURCE(L"OpenNewTabDropdownCommandKey") },
                 { ShortcutAction::OpenScratchpad, USES_RESOURCE(L"OpenScratchpadKey") },

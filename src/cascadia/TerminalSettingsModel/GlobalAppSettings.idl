@@ -107,8 +107,6 @@ namespace Microsoft.Terminal.Settings.Model
         INHERITABLE_SETTING(Boolean, EnableUnfocusedAcrylic);
         INHERITABLE_SETTING(Boolean, AllowHeadless);
         INHERITABLE_SETTING(String, SearchWebDefaultQueryUrl);
-        INHERITABLE_SETTING(String, AgentCliPath);
-        INHERITABLE_SETTING(String, DelegateAgentCliPath);
         INHERITABLE_SETTING(String, AcpAgent);
         INHERITABLE_SETTING(String, AcpModel);
         INHERITABLE_SETTING(String, DelegateAgent);

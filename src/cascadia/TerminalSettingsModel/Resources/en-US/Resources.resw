@@ -747,7 +747,7 @@
     <value>Open current working directory</value>
   </data>
   <data name="OpenAgentPaneCommandKey" xml:space="preserve">
-    <value>Open agent pane</value>
+    <value>Toggle AI assistant</value>
   </data>
   <data name="CloseTab" xml:space="preserve">
     <value>Close tab</value>

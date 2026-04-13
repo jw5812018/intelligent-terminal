@@ -114,7 +114,6 @@ private:
     // Static tracking of live COM instances for event delivery
     static std::mutex s_instancesMutex;
     static std::vector<TerminalProtocolComServer*> s_instances;
-    static std::once_flag s_pageEventsOnce;
 
     bool _instanceRegistered{ false };
 

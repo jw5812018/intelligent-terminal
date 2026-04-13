@@ -657,10 +657,7 @@ namespace winrt::TerminalApp::implementation
         {
             _DelegatePromptToAgent(prompt);
         }
-        else
-        {
-            _OpenOrReuseAgentPane(prompt);
-        }
+        // Empty ? is a no-op. Use >Toggle AI assistant (openAgentPane action) to open the agent pane.
     }
 
     // Method Description:
@@ -694,8 +691,6 @@ namespace winrt::TerminalApp::implementation
         wchar_t buffer[MAX_PATH];
 
         // Prefer GitHub Copilot CLI in ACP mode (JSON-RPC over stdio).
-        // Model selection should come from Copilot's own configuration unless
-        // the user explicitly overrides agentCliPath in Terminal settings.
         // The --acp flag starts the agent as an ACP server; stdio is the
         // default transport.
         if (SearchPathW(nullptr, L"copilot", L".exe", MAX_PATH, buffer, nullptr) > 0)
@@ -718,21 +713,17 @@ namespace winrt::TerminalApp::implementation
     // Method Description:
     // - Auto-detects the WTA (Windows Terminal Agent) executable by searching
     //   the system PATH. WTA is the preferred way to launch agents because it
-    //   handles MCP config injection, giving agents access to Windows Terminal
-    //   MCP tools (pane management, send-keys, etc.).
+    //   handles protocol config injection, giving agents access to Windows Terminal
+    //   tools (pane management, send-keys, etc.) via the Terminal Protocol (wtcli).
     // Arguments:
     // - <none>
     // Return Value:
     // - The full path to wta.exe, or empty string if not found.
     winrt::hstring TerminalPage::_DetectWtaPath() const
     {
-        // 1. Check system PATH first (production scenario).
-        wchar_t buffer[MAX_PATH];
-        if (SearchPathW(nullptr, L"wta", L".exe", MAX_PATH, buffer, nullptr) > 0)
-        {
-            return winrt::hstring{ buffer };
-        }
-
+        // 1. Walk up from the running module to find a local dev build.
+        //    This takes priority so that during development the freshly-built
+        //    wta.exe is always used instead of an older installed copy on PATH.
         auto cursor = std::filesystem::path{ wil::GetModuleFileNameW<std::wstring>(nullptr) }.parent_path();
         while (!cursor.empty())
         {
@@ -757,12 +748,11 @@ namespace winrt::TerminalApp::implementation
             cursor = parent;
         }
 
-        // 2. Check the known dev build location (matches WindowEmperor's hardcoded path).
-        static constexpr std::wstring_view devPath =
-            L"C:\\Users\\xianghong\\Documents\\wta-unified\\wta\\target\\debug\\wta.exe";
-        if (std::filesystem::exists(devPath))
+        // 2. Fall back to system PATH (production / installed scenario).
+        wchar_t buffer[MAX_PATH];
+        if (SearchPathW(nullptr, L"wta", L".exe", MAX_PATH, buffer, nullptr) > 0)
         {
-            return winrt::hstring{ devPath };
+            return winrt::hstring{ buffer };
         }
 
         return winrt::hstring{};
@@ -822,7 +812,7 @@ namespace winrt::TerminalApp::implementation
     //   NOTE: This is no longer used by the command palette agent path.
     //   The command palette now launches WTA via a normal ConPTY pane (see
     //   _OpenOrReuseAgentPane), which gives the agent access to Windows
-    //   Terminal MCP tools. This method is retained for other callers that
+    //   Terminal Protocol tools. This method is retained for other callers that
     //   may still create AcpConnection-based panes directly.
     // Arguments:
     // - startingDirectory - the working directory (passed as cwd in session/new)
@@ -871,9 +861,8 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    // Resolve the effective ACP agent commandline from structured settings,
-    // falling back to the legacy agentCliPath string for backward compat.
-    // If acpAgent is set (the new setting), build: "<agent> <acp_flags> [--model <model>]".
+    // Resolve the effective ACP agent commandline from structured settings.
+    // Build: "<agent> <acp_flags> [--model <model>]".
     // The Rust agent_registry knows the ACP flags for each known agent, but the
     // C++ side doesn't import Rust code — so we duplicate just the flag knowledge
     // for the two ACP-capable agents.  WTA's registry is still the authority at
@@ -888,74 +877,58 @@ namespace winrt::TerminalApp::implementation
         const winrt::Microsoft::Terminal::Settings::Model::GlobalAppSettings& globals,
         const std::function<winrt::hstring()>& detectFallback)
     {
-        // New structured settings take priority — but only if the user explicitly
-        // set them (HasAcpAgent).  Otherwise fall through to the legacy agentCliPath
-        // so existing settings.json files keep working.
-        if (globals.HasAcpAgent())
+        const auto acpAgent = globals.AcpAgent();
+
+        // Custom agents: use the stored custom command directly.
+        if (_IsCustomAgentId(acpAgent))
         {
-            const auto acpAgent = globals.AcpAgent();
-
-            // Custom agents: use the stored custom command directly.
-            if (_IsCustomAgentId(acpAgent))
-            {
-                const auto customCmd = globals.AcpCustomCommand();
-                if (!customCmd.empty()) return customCmd;
-            }
-
-            // Built-in agents: append known ACP flags + model.
-            std::wstring cmd{ acpAgent };
-            const auto lower = winrt::to_string(acpAgent);
-            if (lower == "copilot")
-            {
-                cmd += L" --acp --stdio";
-            }
-            else if (lower == "gemini")
-            {
-                cmd += L" --experimental-acp";
-            }
-            else
-            {
-                // Unknown agent, not in customAgents — fall through to legacy.
-            }
-
-            if (lower == "copilot" || lower == "gemini")
-            {
-                const auto acpModel = globals.AcpModel();
-                if (!acpModel.empty())
-                {
-                    cmd += L" --model ";
-                    cmd += std::wstring_view{ acpModel };
-                }
-                return winrt::hstring{ cmd };
-            }
+            const auto customCmd = globals.AcpCustomCommand();
+            if (!customCmd.empty()) return customCmd;
         }
 
-        // Fall back to legacy raw commandline setting.
-        auto agentCliPath = globals.AgentCliPath();
-        if (agentCliPath.empty() && detectFallback)
+        // Built-in agents: append known ACP flags + model.
+        std::wstring cmd{ acpAgent };
+        const auto lower = winrt::to_string(acpAgent);
+        if (lower == "copilot")
         {
-            agentCliPath = detectFallback();
+            cmd += L" --acp --stdio";
         }
-        return agentCliPath;
+        else if (lower == "gemini")
+        {
+            cmd += L" --experimental-acp";
+        }
+
+        if (lower == "copilot" || lower == "gemini")
+        {
+            const auto acpModel = globals.AcpModel();
+            if (!acpModel.empty())
+            {
+                cmd += L" --model ";
+                cmd += std::wstring_view{ acpModel };
+            }
+            return winrt::hstring{ cmd };
+        }
+
+        // Unknown agent — try auto-detection as last resort.
+        if (detectFallback)
+        {
+            return detectFallback();
+        }
+        return acpAgent;
     }
 
-    // Resolve the effective delegate agent name from structured settings,
-    // falling back to the legacy delegateAgentCliPath string.
+    // Resolve the effective delegate agent name from structured settings.
     static winrt::hstring _ResolveEffectiveDelegateAgent(
         const winrt::Microsoft::Terminal::Settings::Model::GlobalAppSettings& globals)
     {
-        if (globals.HasDelegateAgent())
+        const auto delegateAgent = globals.DelegateAgent();
+        // For custom agents, pass the full command so WTA can launch it.
+        if (_IsCustomAgentId(delegateAgent))
         {
-            const auto delegateAgent = globals.DelegateAgent();
-            // For custom agents, pass the full command so WTA can launch it.
-            if (_IsCustomAgentId(delegateAgent))
-            {
-                const auto customCmd = globals.DelegateCustomCommand();
-                if (!customCmd.empty()) return customCmd;
-            }
-            return delegateAgent;
+            const auto customCmd = globals.DelegateCustomCommand();
+            if (!customCmd.empty()) return customCmd;
         }
-        return globals.DelegateAgentCliPath();
+        return delegateAgent;
     }
 
     void TerminalPage::_DelegatePromptToAgent(const winrt::hstring& prompt)
@@ -970,7 +943,7 @@ namespace winrt::TerminalApp::implementation
             return;
         }
 
-        // Resolve agent CLI from structured settings (acpAgent/acpModel) or legacy agentCliPath.
+        // Resolve agent CLI from structured settings (acpAgent/acpModel).
         const auto& globals = _settings.GlobalSettings();
         const auto agentCliPath = _ResolveEffectiveAgentCliPath(globals, [this]() { return _DetectAgentCli(); });
 
@@ -984,7 +957,7 @@ namespace winrt::TerminalApp::implementation
             return L"\"" + escaped + L"\"";
         };
 
-        // Build: wta delegate --pipe-name <pipe> --pipe-token <token> --agent <agent> "<prompt>"
+        // Build: wta delegate --agent <agent> --delegate-agent <delegate> "<prompt>"
         std::wstring cmdline = quoteArg(wtaPath) + L" delegate";
 
         if (!agentCliPath.empty())
@@ -1003,14 +976,7 @@ namespace winrt::TerminalApp::implementation
             cmdline += L" --delegate-model " + quoteArg(std::wstring_view{ delegateModel });
         }
 
-        if (const auto pipeName = _WindowProperties.ProtocolPipeName(); !pipeName.empty())
-        {
-            cmdline += L" --pipe-name " + quoteArg(std::wstring_view{ pipeName });
-        }
-        if (const auto token = _WindowProperties.McpToken(); !token.empty())
-        {
-            cmdline += L" --pipe-token " + quoteArg(winrt::to_hstring(token).c_str());
-        }
+
 
         // Pass CWD from the active pane.
         winrt::hstring activeCwd;
@@ -4369,7 +4335,7 @@ namespace winrt::TerminalApp::implementation
             // Create an AcpConnection instead of ConPTY when --agent is specified.
             // NOTE: The command palette agent path no longer uses this branch.
             // It now launches WTA via a normal ConPTY pane (see _OpenOrReuseAgentPane)
-            // which provides MCP tool access. This branch is still used by callers
+            // which provides Terminal Protocol tool access via wtcli. This branch is still used by callers
             // that set IsAcpAgent directly (e.g. CLI startup actions).
             const auto agentCliPath = _ResolveEffectiveAgentCliPath(
                 _settings.GlobalSettings(), [this]() { return _DetectAgentCli(); });

@@ -1027,7 +1027,7 @@ namespace winrt::Microsoft::Terminal::TerminalConnection::implementation
         {
             sessionParams.SetNamedValue(L"cwd", WDJ::JsonValue::CreateStringValue(_workingDirectory));
         }
-        sessionParams.SetNamedValue(L"mcpServers", WDJ::JsonArray{});
+        sessionParams.SetNamedValue(L"protocolServers", WDJ::JsonArray{});
 
         auto sessionFuture = _SendRequest(L"session/new", sessionParams);
 

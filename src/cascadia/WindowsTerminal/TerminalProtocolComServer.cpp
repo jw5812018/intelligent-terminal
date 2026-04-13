@@ -25,7 +25,6 @@ static wil::unique_event g_comMtaStop;
 // Static instance tracking for event delivery to COM clients
 std::mutex TerminalProtocolComServer::s_instancesMutex;
 std::vector<TerminalProtocolComServer*> TerminalProtocolComServer::s_instances;
-std::once_flag TerminalProtocolComServer::s_pageEventsOnce;
 
 void TerminalProtocolComServer::s_setEmperor(WindowEmperor* emperor) noexcept
 {
@@ -145,20 +144,33 @@ void TerminalProtocolComServer::_ensurePageEventsRegistered()
     if (!s_emperor)
         return;
 
-    std::call_once(s_pageEventsOnce, []() {
-        for (const auto& host : s_emperor->GetWindows())
-        {
-            const auto page = _getPage(host.get());
-            if (!page)
-                continue;
+    // Use a retryable pattern instead of call_once: if no page is found on
+    // the first Subscribe() call (e.g. during early startup), we allow retry
+    // on subsequent calls rather than permanently giving up.
+    static std::atomic<bool> s_registered{ false };
+    static std::mutex s_regMutex;
 
-            page.ProtocolVtSequenceReceived(
-                [](auto&&, const winrt::hstring& eventJson) {
-                    s_NotifyEventToComClients(winrt::to_string(eventJson));
-                });
-            break; // Single-window for now
-        }
-    });
+    if (s_registered.load(std::memory_order_acquire))
+        return;
+
+    std::lock_guard lock{ s_regMutex };
+    if (s_registered.load(std::memory_order_relaxed))
+        return;
+
+    for (const auto& host : s_emperor->GetWindows())
+    {
+        const auto page = _getPage(host.get());
+        if (!page)
+            continue;
+
+        page.ProtocolVtSequenceReceived(
+            [](auto&&, const winrt::hstring& eventJson) {
+                s_NotifyEventToComClients(winrt::to_string(eventJson));
+            });
+        s_registered.store(true, std::memory_order_release);
+        return;
+    }
+    // No page found — don't mark registered, allow retry on next Subscribe().
 }
 
 void TerminalProtocolComServer::s_NotifyEventToComClients(const std::string& eventJson)
@@ -247,7 +259,7 @@ Protocol::AuthResult TerminalProtocolComServer::Authenticate(winrt::hstring cons
 {
     THROW_HR_IF(E_NOT_VALID_STATE, !s_emperor);
 
-    // DEV BYPASS: always authenticate — MCP credential plumbing removed.
+    // DEV BYPASS: always authenticate — credential plumbing not yet implemented.
     _authenticated = true;
 
     // Register for event delivery on successful authentication
