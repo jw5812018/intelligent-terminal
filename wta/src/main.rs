@@ -2,6 +2,7 @@ mod agent_registry;
 mod app;
 mod coordinator;
 mod event;
+mod preflight;
 mod protocol;
 mod runtime_paths;
 mod shared_host;
@@ -1338,6 +1339,10 @@ async fn run_attach_tui(
 
     let autofix_enabled = !no_autofix;
 
+    // ── Preflight: check agent CLI before connecting to shared host ──
+    let preflight_result = preflight::check_agent(&agent).await;
+    let start_in_setup = !preflight_result.all_passed();
+
     // Set up the TUI.
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -1410,17 +1415,31 @@ async fn run_attach_tui(
             // Spawn the attach client (replaces run_acp_client in shared mode).
             // In attach mode, all prompts/recommendations/permissions are forwarded
             // to the shared host — no local ACP client or recommendation executor.
-            let attach_event_tx = event_tx.clone();
-            tokio::task::spawn_local(shared_host::run_attach_client(
-                host_pipe_name,
-                attach_event_tx,
-                prompt_rx,
-                recommendation_rx,
-                permission_rx,
-                pane_context,
-                initial_prompt,
-                debug_capture_enabled.clone(),
-            ));
+            let attach_launched = std::cell::Cell::new(false);
+            let prompt_rx_cell = std::cell::RefCell::new(Some(prompt_rx));
+            let recommendation_rx_cell = std::cell::RefCell::new(Some(recommendation_rx));
+            let permission_rx_cell = std::cell::RefCell::new(Some(permission_rx));
+
+            if !start_in_setup {
+                if let (Some(prx), Some(rrx), Some(perx)) = (
+                    prompt_rx_cell.borrow_mut().take(),
+                    recommendation_rx_cell.borrow_mut().take(),
+                    permission_rx_cell.borrow_mut().take(),
+                ) {
+                    let attach_event_tx = event_tx.clone();
+                    tokio::task::spawn_local(shared_host::run_attach_client(
+                        host_pipe_name.clone(),
+                        attach_event_tx,
+                        prx,
+                        rrx,
+                        perx,
+                        pane_context.clone(),
+                        initial_prompt.clone(),
+                        debug_capture_enabled.clone(),
+                    ));
+                    attach_launched.set(true);
+                }
+            }
 
             let (_ui_event_tx, ui_event_rx) = tokio::sync::mpsc::unbounded_channel();
 
@@ -1428,11 +1447,17 @@ async fn run_attach_tui(
                 prompt_tx,
                 recommendation_tx,
                 permission_tx,
-                debug_capture_enabled,
+                debug_capture_enabled.clone(),
                 wt_connected,
                 true, // shared_mode
                 autofix_enabled,
             );
+
+            // If preflight failed, enter Setup mode
+            if start_in_setup {
+                let _ = event_tx.send(app::AppEvent::PreflightComplete(preflight_result.clone()));
+            }
+
             if let Some((pane_id, tab_id, window_id)) = pane_identity {
                 app_state.pane_id = Some(pane_id);
                 app_state.tab_id = Some(tab_id);
@@ -1443,7 +1468,48 @@ async fn run_attach_tui(
             app_state.source_cwd =
                 std::env::var("WTA_SOURCE_CWD").ok().filter(|s| !s.is_empty());
 
-            app_state.run(&mut terminal, event_rx, ui_event_rx).await
+            // Use the setup-aware event loop so [R] retry works and
+            // the attach client launches once preflight passes.
+            let agent_for_recheck = agent.clone();
+            let (recheck_tx, mut recheck_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+            let recheck_event_tx = event_tx.clone();
+            tokio::task::spawn_local(async move {
+                while recheck_rx.recv().await.is_some() {
+                    let result = preflight::check_agent(&agent_for_recheck).await;
+                    let _ = recheck_event_tx.send(app::AppEvent::PreflightComplete(result));
+                }
+            });
+
+            run_app_with_setup(
+                &mut app_state,
+                &mut terminal,
+                event_rx,
+                ui_event_rx,
+                recheck_tx,
+                || {
+                    if !attach_launched.get() {
+                        if let (Some(prx), Some(rrx), Some(perx)) = (
+                            prompt_rx_cell.borrow_mut().take(),
+                            recommendation_rx_cell.borrow_mut().take(),
+                            permission_rx_cell.borrow_mut().take(),
+                        ) {
+                            let attach_event_tx = event_tx.clone();
+                            tokio::task::spawn_local(shared_host::run_attach_client(
+                                host_pipe_name.clone(),
+                                attach_event_tx,
+                                prx,
+                                rrx,
+                                perx,
+                                pane_context.clone(),
+                                initial_prompt.clone(),
+                                debug_capture_enabled.clone(),
+                            ));
+                            attach_launched.set(true);
+                        }
+                    }
+                },
+            )
+            .await
         })
         .await;
 
@@ -1834,20 +1900,38 @@ async fn run_acp_app(
                 });
             }
 
-            let acp_event_tx = event_tx.clone();
+            // ── Preflight: check agent CLI availability before launching ──
+            let preflight_result = preflight::check_agent(&agent_cmd).await;
+            let start_in_setup = !preflight_result.all_passed();
+
             let shell_mgr_for_recs = Arc::clone(&shell_mgr);
-            tokio::task::spawn_local(protocol::acp::client::run_acp_client(
-                agent_cmd,
-                acp_event_tx,
-                prompt_rx,
-                shell_mgr,
-                wt_connected,
-            ));
+
+            // Store prompt_rx in a RefCell so we can take it when transitioning
+            // from Setup to Chat mode (ACP client needs ownership).
+            let prompt_rx_cell = std::cell::RefCell::new(Some(prompt_rx));
+            let acp_launched = std::cell::Cell::new(false);
+
+            // Only spawn ACP client if preflight passed
+            if !start_in_setup {
+                let acp_event_tx = event_tx.clone();
+                let shell_mgr_clone = Arc::clone(&shell_mgr);
+                let agent_cmd_clone = agent_cmd.clone();
+                if let Some(rx) = prompt_rx_cell.borrow_mut().take() {
+                    tokio::task::spawn_local(protocol::acp::client::run_acp_client(
+                        agent_cmd_clone,
+                        acp_event_tx,
+                        rx,
+                        shell_mgr_clone,
+                        wt_connected,
+                    ));
+                    acp_launched.set(true);
+                }
+            }
 
             let (recommendation_tx, recommendation_rx) = tokio::sync::mpsc::unbounded_channel();
             let (permission_tx, _permission_rx) = tokio::sync::mpsc::unbounded_channel();
             let debug_capture_enabled = Arc::new(AtomicBool::new(false));
-            let (ui_event_tx, ui_event_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (_ui_event_tx, ui_event_rx) = tokio::sync::mpsc::unbounded_channel();
 
             // Spawn the recommendation executor so selected choices actually run.
             let rec_event_tx = event_tx.clone();
@@ -1865,6 +1949,12 @@ async fn run_acp_app(
 
             let autofix_enabled = !cli.no_autofix;
             let mut app_state = app::App::new(prompt_tx, recommendation_tx, permission_tx, debug_capture_enabled, wt_connected, false, autofix_enabled);
+
+            // If preflight failed, start in Setup mode
+            if start_in_setup {
+                let _ = event_tx.send(app::AppEvent::PreflightComplete(preflight_result));
+            }
+
             if let Some((pane_id, tab_id, window_id)) = pane_identity {
                 app_state.pane_id = Some(pane_id);
                 app_state.tab_id = Some(tab_id);
@@ -1882,7 +1972,136 @@ async fn run_acp_app(
                 }
             }
 
-            app_state.run(terminal, event_rx, ui_event_rx).await
+            // Spawn a background task that watches for setup recheck requests
+            // and re-runs preflight when [R] is pressed.
+            let recheck_event_tx = event_tx.clone();
+            let recheck_agent_cmd = agent_cmd.clone();
+            let (recheck_tx, mut recheck_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+            tokio::task::spawn_local(async move {
+                while recheck_rx.recv().await.is_some() {
+                    let result = preflight::check_agent(&recheck_agent_cmd).await;
+                    let _ = recheck_event_tx.send(app::AppEvent::PreflightComplete(result));
+                }
+            });
+
+            // Override the app's run loop to also check for setup_needs_recheck
+            // and launch ACP client when transitioning from Setup to Chat.
+            // We do this by running the app loop with an interceptor.
+            let app_run_result = run_app_with_setup(
+                &mut app_state,
+                terminal,
+                event_rx,
+                ui_event_rx,
+                recheck_tx,
+                || {
+                    if !acp_launched.get() {
+                        if let Some(rx) = prompt_rx_cell.borrow_mut().take() {
+                            let acp_event_tx = event_tx.clone();
+                            let shell_mgr_clone = Arc::clone(&shell_mgr);
+                            let agent_cmd_clone = agent_cmd.clone();
+                            tokio::task::spawn_local(protocol::acp::client::run_acp_client(
+                                agent_cmd_clone,
+                                acp_event_tx,
+                                rx,
+                                shell_mgr_clone,
+                                wt_connected,
+                            ));
+                            acp_launched.set(true);
+                        }
+                    }
+                },
+            )
+            .await;
+            app_run_result
         })
         .await
+}
+
+/// Wrapper around `App::run` that intercepts setup-mode events.
+/// When the user presses [R] in setup mode, triggers a preflight recheck.
+/// When setup completes (all checks pass), launches the ACP client.
+async fn run_app_with_setup<F: FnMut()>(
+    app: &mut app::App,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    mut event_rx: tokio::sync::mpsc::UnboundedReceiver<app::AppEvent>,
+    ui_event_rx: tokio::sync::mpsc::UnboundedReceiver<app::AppEvent>,
+    recheck_tx: tokio::sync::mpsc::UnboundedSender<()>,
+    mut launch_acp: F,
+) -> Result<()> {
+    // Merge ui_event_rx into event_rx via a forwarding task
+    let (merged_tx, mut merged_rx) = tokio::sync::mpsc::unbounded_channel();
+    let merged_tx2 = merged_tx.clone();
+
+    tokio::task::spawn_local(async move {
+        let mut ui_rx = ui_event_rx;
+        while let Some(ev) = ui_rx.recv().await {
+            let _ = merged_tx2.send(ev);
+        }
+    });
+
+    // Forward events from event_rx into the merged channel
+    let merged_tx3 = merged_tx.clone();
+    tokio::task::spawn_local(async move {
+        while let Some(ev) = event_rx.recv().await {
+            let _ = merged_tx3.send(ev);
+        }
+    });
+
+    // Run the main app loop with a tick-based setup recheck watcher
+    const MAX_EVENTS_PER_FRAME: usize = 64;
+
+    app.draw_frame(terminal)?;
+
+    loop {
+        if app.should_quit {
+            break;
+        }
+
+        let event = match merged_rx.recv().await {
+            Some(ev) => ev,
+            None => break, // All senders dropped
+        };
+
+        // Check if this is a PreflightComplete that should trigger ACP launch
+        let should_launch = matches!(&event, app::AppEvent::PreflightComplete(r) if r.all_passed());
+
+        app.apply_resize_if_needed(terminal, &event)?;
+        let should_redraw = app.event_requires_redraw(&event);
+        app.handle_event(event);
+
+        if should_launch {
+            launch_acp();
+        }
+
+        // Check if setup wizard wants a recheck
+        if app.setup_needs_recheck() {
+            let _ = recheck_tx.send(());
+        }
+
+        // Drain additional ready events
+        let mut count = 1;
+        while count < MAX_EVENTS_PER_FRAME {
+            match merged_rx.try_recv() {
+                Ok(ev) => {
+                    let should_launch2 = matches!(&ev, app::AppEvent::PreflightComplete(r) if r.all_passed());
+                    app.apply_resize_if_needed(terminal, &ev)?;
+                    app.handle_event(ev);
+                    if should_launch2 {
+                        launch_acp();
+                    }
+                    if app.setup_needs_recheck() {
+                        let _ = recheck_tx.send(());
+                    }
+                    count += 1;
+                }
+                Err(_) => break,
+            }
+        }
+
+        if should_redraw || count > 1 {
+            app.draw_frame(terminal)?;
+        }
+    }
+
+    Ok(())
 }

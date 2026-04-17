@@ -1420,6 +1420,13 @@ namespace winrt::TerminalApp::implementation
         if (cmdline.empty())
         {
             _agentPaneLog("EARLY RETURN: cmdline is empty — no AI assistant configured");
+            // Show a toast notification so the user knows why nothing happened.
+            if (auto tip{ FindName(L"WindowIdToast").try_as<MUX::Controls::TeachingTip>() })
+            {
+                tip.Title(RS_(L"AgentNotConfiguredTitle"));
+                tip.Subtitle(RS_(L"AgentNotConfiguredSubtitle"));
+                tip.IsOpen(true);
+            }
             return;
         }
         _agentPaneLog("cmdline built OK");

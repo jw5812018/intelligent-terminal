@@ -269,10 +269,13 @@ fn build_message_lines<'a>(
             lines.push(Line::default());
         }
         ChatMessage::Error(text) => {
-            lines.push(Line::from(Span::styled(
-                format!("Error: {}", truncate_render_text(text)),
-                theme::ERROR_STYLE,
-            )));
+            for (i, line_text) in text.lines().enumerate() {
+                let prefix = if i == 0 { "Error: " } else { "  " };
+                lines.push(Line::from(Span::styled(
+                    format!("{}{}", prefix, truncate_render_text(line_text)),
+                    theme::ERROR_STYLE,
+                )));
+            }
             lines.push(Line::default());
         }
     }

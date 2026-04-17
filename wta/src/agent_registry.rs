@@ -53,6 +53,16 @@ pub struct AgentProfile {
     /// Flag names used to specify a model (e.g. `["--model", "-m"]`).
     /// Empty slice means the agent doesn't support model selection.
     pub model_flags: &'static [&'static str],
+
+    // ── Setup / OOBE ──
+    /// Human-readable install instructions shown when binary is not found.
+    pub install_hint: &'static str,
+    /// URL for the agent's install page / documentation.
+    pub install_url: &'static str,
+    /// Command to check auth status (empty if N/A). Exit 0 = authenticated.
+    pub auth_check_command: &'static str,
+    /// Human-readable auth instructions shown when not logged in.
+    pub auth_hint: &'static str,
 }
 
 // ─── Registry ────────────────────────────────────────────────────────────────
@@ -66,6 +76,10 @@ pub const KNOWN_AGENTS: &[AgentProfile] = &[
         acp_auth_flow: AcpAuthFlow::External,
         delegate_prompt_flag: PromptFlag::Flag("-i"),
         model_flags: &["--model", "-m"],
+        install_hint: "npm install -g @github/copilot\n     or: winget install GitHub.Copilot",
+        install_url: "https://github.com/github/copilot-cli",
+        auth_check_command: "copilot auth status",
+        auth_hint: "Run: copilot auth\n  or: gh auth login",
     },
     AgentProfile {
         id: "claude",
@@ -75,6 +89,10 @@ pub const KNOWN_AGENTS: &[AgentProfile] = &[
         acp_auth_flow: AcpAuthFlow::None,
         delegate_prompt_flag: PromptFlag::Positional,
         model_flags: &[],
+        install_hint: "npm install -g @anthropic-ai/claude-code",
+        install_url: "https://docs.anthropic.com/en/docs/claude-code",
+        auth_check_command: "",
+        auth_hint: "Run: claude login",
     },
     AgentProfile {
         id: "codex",
@@ -84,6 +102,10 @@ pub const KNOWN_AGENTS: &[AgentProfile] = &[
         acp_auth_flow: AcpAuthFlow::None,
         delegate_prompt_flag: PromptFlag::Positional,
         model_flags: &[],
+        install_hint: "npm install -g @openai/codex",
+        install_url: "https://github.com/openai/codex",
+        auth_check_command: "",
+        auth_hint: "Run: codex auth",
     },
     AgentProfile {
         id: "gemini",
@@ -93,6 +115,10 @@ pub const KNOWN_AGENTS: &[AgentProfile] = &[
         acp_auth_flow: AcpAuthFlow::InProtocol,
         delegate_prompt_flag: PromptFlag::Positional,
         model_flags: &["--model", "-m"],
+        install_hint: "npm install -g @anthropic-ai/gemini-cli\n  or: pip install gemini-cli",
+        install_url: "https://github.com/google-gemini/gemini-cli",
+        auth_check_command: "",
+        auth_hint: "Authentication is handled in-protocol during connection.",
     },
 ];
 
@@ -104,6 +130,10 @@ pub const DEFAULT_PROFILE: AgentProfile = AgentProfile {
     acp_auth_flow: AcpAuthFlow::None,
     delegate_prompt_flag: PromptFlag::Flag("-i"),
     model_flags: &["--model", "-m"],
+    install_hint: "",
+    install_url: "",
+    auth_check_command: "",
+    auth_hint: "",
 };
 
 /// Default ACP command used when no agent is configured.

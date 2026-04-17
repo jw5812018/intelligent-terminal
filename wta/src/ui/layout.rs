@@ -1,11 +1,25 @@
 use ratatui::prelude::*;
 
-use crate::app::App;
+use crate::app::{App, AppMode};
 
-use super::{chat, debug_panel, input, notification_banner, permission, recommendations, status_bar};
+use super::{chat, debug_panel, input, notification_banner, permission, recommendations, setup, status_bar};
 
 pub fn render(frame: &mut Frame, app: &App) {
     let area = frame.area();
+
+    // If in Setup mode, render the setup wizard full-screen
+    if app.mode == AppMode::Setup {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1), // status bar
+                Constraint::Min(1),   // setup wizard
+            ])
+            .split(area);
+        status_bar::render(frame, app, chunks[0]);
+        setup::render(frame, app, chunks[1]);
+        return;
+    }
 
     // Split horizontally if debug panel is visible
     let (main_area, debug_area) = if app.show_debug_panel {
@@ -58,6 +72,11 @@ pub fn render(frame: &mut Frame, app: &App) {
 }
 
 pub fn input_cursor_position(app: &App, area: Rect) -> Option<Position> {
+    // No cursor in setup mode
+    if app.mode == AppMode::Setup {
+        return None;
+    }
+
     let main_area = if app.show_debug_panel {
         Layout::default()
             .direction(Direction::Horizontal)
