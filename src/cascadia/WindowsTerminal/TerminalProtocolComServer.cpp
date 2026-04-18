@@ -472,6 +472,7 @@ Protocol::TabCreationResult TerminalProtocolComServer::CreateTab(
     winrt::hstring const& profile,
     winrt::hstring const& commandline,
     winrt::hstring const& title,
+    winrt::hstring const& startingDirectory,
     bool suppressAppTitle,
     bool background)
 {
@@ -498,6 +499,8 @@ Protocol::TabCreationResult TerminalProtocolComServer::CreateTab(
         newTermArgs.Profile(profile);
     if (!commandline.empty())
         newTermArgs.Commandline(commandline);
+    if (!startingDirectory.empty())
+        newTermArgs.StartingDirectory(startingDirectory);
     if (!title.empty())
     {
         newTermArgs.TabTitle(title);

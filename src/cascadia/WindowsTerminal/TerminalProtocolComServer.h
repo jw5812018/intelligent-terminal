@@ -73,6 +73,7 @@ TerminalProtocolComServer : winrt::implements<TerminalProtocolComServer, Protoco
                                            winrt::hstring const& profile,
                                            winrt::hstring const& commandline,
                                            winrt::hstring const& title,
+                                           winrt::hstring const& startingDirectory,
                                            bool suppressAppTitle,
                                            bool background);
     Protocol::TabCreationResult SplitPane(uint32_t paneId,

@@ -1558,6 +1558,16 @@ namespace winrt::TerminalApp::implementation
         {
             rootPane->HidePane(newPane);
         }
+
+        // Restore focus to the original terminal. AttachPane handed focus to
+        // the (now hidden) agent pane, and HidePane re-parented the visible
+        // subtree — both would leave no element focused. Must run after
+        // HidePane so it isn't wiped by the re-parent.
+        if (const auto& activeControl = tab->GetActiveTerminalControl())
+        {
+            activeControl.Focus(winrt::Windows::UI::Xaml::FocusState::Programmatic);
+        }
+
         _agentPaneLog("_AutoCreateHiddenAgentPane: done, pane split and hidden");
     }
 

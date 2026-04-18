@@ -359,10 +359,11 @@ int main()
     });
 
     // ── new-tab ──
-    std::string newTabCommand, newTabTitle;
+    std::string newTabCommand, newTabTitle, newTabCwd;
     auto* newTabCmd = app.add_subcommand("new-tab", "Create a new tab")->alias("neww");
     newTabCmd->add_option("-c,--command", newTabCommand, "Command to run");
     newTabCmd->add_option("-n,--title", newTabTitle, "Tab title");
+    newTabCmd->add_option("-d,--cwd", newTabCwd, "Starting directory");
     newTabCmd->callback([&]() {
         auto server = connect();
         if (!server) return;
@@ -372,6 +373,7 @@ int main()
                 0, L"",
                 winrt::to_hstring(newTabCommand),
                 winrt::to_hstring(newTabTitle),
+                winrt::to_hstring(newTabCwd),
                 false, true);
             if (jsonMode)
                 PrintJson(CreationResultToJson(result));

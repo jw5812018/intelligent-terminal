@@ -223,8 +223,10 @@ impl WtChannel for CliChannel {
                 let mut args = vec!["new-tab"];
                 let cmd = params.get("commandline").and_then(|v| v.as_str()).unwrap_or("");
                 let title = params.get("title").and_then(|v| v.as_str()).unwrap_or("");
+                let cwd = params.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
                 let cmd_owned;
                 let title_owned;
+                let cwd_owned;
                 if !cmd.is_empty() {
                     cmd_owned = cmd.to_string();
                     args.extend(["-c", &cmd_owned]);
@@ -232,6 +234,10 @@ impl WtChannel for CliChannel {
                 if !title.is_empty() {
                     title_owned = title.to_string();
                     args.extend(["-n", &title_owned]);
+                }
+                if !cwd.is_empty() {
+                    cwd_owned = cwd.to_string();
+                    args.extend(["-d", &cwd_owned]);
                 }
                 self.run_wtcli(&args).await
             }

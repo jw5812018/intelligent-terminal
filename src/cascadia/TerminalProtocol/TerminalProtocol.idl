@@ -108,7 +108,7 @@ namespace Microsoft.Terminal.Protocol
         String GetSettings();
 
         // Mutations
-        TabCreationResult CreateTab(UInt64 windowId, String profile, String commandline, String title, Boolean suppressAppTitle, Boolean background);
+        TabCreationResult CreateTab(UInt64 windowId, String profile, String commandline, String title, String startingDirectory, Boolean suppressAppTitle, Boolean background);
         TabCreationResult SplitPane(UInt32 paneId, String direction, Single size, String profile, String commandline, Boolean background);
         void ClosePane(UInt32 paneId);
         void SendInput(UInt32 paneId, String text);

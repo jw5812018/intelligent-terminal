@@ -718,6 +718,24 @@ namespace winrt::TerminalApp::implementation
             originalTree->Id(rootPaneId.value());
         }
 
+        // Redirect active-pane tracking back into the original tree.
+        // AttachPane mutates _rootPane in place: when the old root was a
+        // single leaf, _activePane pointed at that Pane object, which is
+        // now a non-leaf parent — causing Tab::_GetActiveTitle() to return
+        // "Multiple panes". Note: we deliberately do NOT restore XAML
+        // focus here. Callers that hide the new pane (HidePane) will
+        // re-parent the visible subtree, wiping any focus we set. Focus
+        // restoration is the caller's responsibility and must happen after
+        // HidePane.
+        if (_activePane && !_activePane->_IsLeaf())
+        {
+            auto originalLeaf = originalTree->_IsLeaf() ? originalTree : originalTree->GetActivePane();
+            if (originalLeaf && originalLeaf->_IsLeaf())
+            {
+                _UpdateActivePane(originalLeaf);
+            }
+        }
+
         // After split, Close Pane Menu Item should be visible
         _closePaneMenuItem.Visibility(WUX::Visibility::Visible);
 
