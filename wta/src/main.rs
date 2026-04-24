@@ -518,34 +518,11 @@ async fn main() -> Result<()> {
             run_set_env(&pipe_override, &shell)
         }
 
-        // ── Ensure host (called by WT on startup) ──
-        Some(Command::EnsureHost {
-            agent,
-            delegate_agent,
-            delegate_model,
-        }) => {
-            run_ensure_host(
-                &pipe_override,
-                agent.unwrap_or_else(|| agent_registry::DEFAULT_ACP_COMMAND.to_string()),
-                delegate_agent,
-                delegate_model,
-            )
-            .await
-        }
+        // ── Ensure host — no-op (centralized architecture: no separate host process) ──
+        Some(Command::EnsureHost { .. }) => Ok(()),
 
-        // ── Attach to shared host (lightweight pane TUI) ──
-        Some(Command::Attach { host_pipe, prompt }) => {
-            run_attach_tui(
-                pipe_override,
-                cli.agent,
-                cli.delegate_agent,
-                cli.delegate_model,
-                cli.no_autofix,
-                host_pipe,
-                prompt,
-            )
-            .await
-        }
+        // ── Attach — no-op (centralized architecture: use default TUI mode instead) ──
+        Some(Command::Attach { .. }) => Ok(()),
 
         // ── Delegate prompt to new tab agent ──
         Some(Command::Delegate {
@@ -1085,7 +1062,7 @@ async fn delegate_with_context(
     Ok(())
 }
 
-// ─── Ensure host (background mode) ──────────────────────────────────────────
+// ─── Ensure host (background mode — no-op in centralized architecture) ──────
 
 async fn run_ensure_host(
     po: &PipeOverride,
@@ -1471,10 +1448,9 @@ async fn run_attach_tui(
                 permission_tx,
                 debug_capture_enabled.clone(),
                 wt_connected,
-                true, // shared_mode
                 autofix_enabled,
             );
-            app_state.dismiss_autofix_tx = Some(dismiss_autofix_tx);
+            let _ = dismiss_autofix_tx; // was used for shared_mode dismiss; no longer needed
 
             // If preflight failed, enter Setup mode with static guidance
             // (no retry — user must close and reopen the agent pane).
@@ -1905,7 +1881,7 @@ async fn run_acp_app(
             ));
 
             let autofix_enabled = !cli.no_autofix;
-            let mut app_state = app::App::new(prompt_tx, recommendation_tx, permission_tx, debug_capture_enabled, wt_connected, false, autofix_enabled);
+            let mut app_state = app::App::new(prompt_tx, recommendation_tx, permission_tx, debug_capture_enabled, wt_connected, autofix_enabled);
 
             // If preflight failed, start in Setup mode
             if start_in_setup {

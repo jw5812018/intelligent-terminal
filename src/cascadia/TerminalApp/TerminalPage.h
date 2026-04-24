@@ -296,9 +296,8 @@ namespace winrt::TerminalApp::implementation
         std::shared_ptr<Toast> _actionSaveFailedToast{ nullptr };
         std::shared_ptr<Toast> _windowCwdToast{ nullptr };
 
-        // Agent pane tracking - weak pointers to agent panes for reuse.
-        // Expired entries are pruned lazily during lookup.
-        std::vector<std::weak_ptr<Pane>> _agentPanes;
+        // Single agent pane shared across all tabs in this window.
+        std::weak_ptr<Pane> _agentPane;
 
         // --- Bottom bar (AI toolbar) ---
         enum class AutofixState
@@ -330,17 +329,10 @@ namespace winrt::TerminalApp::implementation
         // restore focus on toggle-off.
         std::optional<uint32_t> _priorPaneId;
 
-        // Shared agent host process — started once, persists for the session.
-        // The job object ensures the host is killed when Terminal exits.
-        bool _agentHostStarted{ false };
-        HANDLE _agentHostProcess{ nullptr };
-        HANDLE _agentHostJob{ nullptr };
-        void _EnsureAgentHostStarted();
-        void _AutoCreateHiddenAgentPane(winrt::com_ptr<Tab> tab);
 
         // Hot-reload of agent/model settings. Snapshot is captured on first
         // SetSettings and after every rebuild; a diff drives teardown/rebuild
-        // of the pane(s) + host.
+        // of the agent pane.
         struct AgentSettingsSnapshot
         {
             std::wstring acpAgent;
@@ -355,10 +347,9 @@ namespace winrt::TerminalApp::implementation
         bool _agentRebuilding{ false };
         AgentSettingsSnapshot _CaptureAgentSettingsSnapshot() const;
         static bool _AgentSettingsChanged(const AgentSettingsSnapshot& a, const AgentSettingsSnapshot& b);
-        static bool _AgentHostAffectingChange(const AgentSettingsSnapshot& a, const AgentSettingsSnapshot& b);
-        void _TeardownAgentPanes();
-        void _TeardownAgentHost();
+        void _TeardownAgentPane();
         void _RebuildAgentStack();
+        void _AutoCreateHiddenAgentPane(winrt::com_ptr<Tab> tab);
 
         winrt::Windows::UI::Xaml::Controls::TextBox::LayoutUpdated_revoker _renamerLayoutUpdatedRevoker;
         int _renamerLayoutCount{ 0 };
@@ -562,7 +553,8 @@ namespace winrt::TerminalApp::implementation
         // Agent pane helpers
         winrt::hstring _DetectAgentCli() const;
         winrt::hstring _DetectWtaPath() const;
-        std::shared_ptr<Pane> _FindAgentPaneInCurrentTab();
+        std::shared_ptr<Pane> _FindAgentPane();
+        winrt::com_ptr<Tab> _FindTabContainingAgentPane();
         void _DelegatePromptToAgent(const winrt::hstring& prompt);
         void _OpenOrReuseAgentPane(const winrt::hstring& prompt);
         void _RepositionAgentPanes();
