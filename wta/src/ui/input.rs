@@ -1,5 +1,5 @@
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Padding, Paragraph};
 use unicode_width::UnicodeWidthChar;
 
 use crate::app::{App, ConnectionState};
@@ -7,6 +7,7 @@ use crate::theme;
 
 pub(crate) const INPUT_MIN_HEIGHT: u16 = 3;
 pub(crate) const INPUT_MAX_HEIGHT: u16 = 8;
+const INPUT_LEFT_PAD: u16 = 1;
 const INPUT_MIN_INNER_ROWS: usize = (INPUT_MIN_HEIGHT - 2) as usize;
 const INPUT_MAX_INNER_ROWS: usize = (INPUT_MAX_HEIGHT - 2) as usize;
 
@@ -26,13 +27,17 @@ struct WrappedInput {
 }
 
 pub fn render(frame: &mut Frame, app: &App, area: Rect) {
-    let block = Block::default().borders(Borders::ALL);
-    let viewport = input_viewport(&app.input, app.cursor_pos, area.width);
+    let block = Block::default()
+        .borders(Borders::TOP | Borders::BOTTOM)
+        .border_style(theme::INPUT_BORDER)
+        .style(Style::new().bg(theme::INPUT_BG))
+        .padding(Padding::new(INPUT_LEFT_PAD, 0, 0, 0));
+    let viewport = input_viewport(&app.input, app.cursor_pos, area.width.saturating_sub(INPUT_LEFT_PAD));
 
     let lines: Vec<Line> = if app.input.is_empty() {
         // Show a placeholder reflecting connection state.
         let placeholder = match &app.state {
-            ConnectionState::Connected => ">  Ask anything, / for commands..".to_string(),
+            ConnectionState::Connected => " >  Ask anything, / for commands..".to_string(),
             ConnectionState::Connecting(_) => "connecting...".to_string(),
             ConnectionState::Disconnected => "disconnect".to_string(),
             ConnectionState::Failed(_) => "disconnect".to_string(),
@@ -56,30 +61,30 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 pub(crate) fn input_height(input: &str, cursor_pos: usize, total_width: u16) -> u16 {
-    let viewport = input_viewport(input, cursor_pos, total_width);
+    let viewport = input_viewport(input, cursor_pos, total_width.saturating_sub(INPUT_LEFT_PAD));
     (viewport.visible_lines.len() as u16 + 2).clamp(INPUT_MIN_HEIGHT, INPUT_MAX_HEIGHT)
 }
 
 pub(crate) fn cursor_position(app: &App, area: Rect) -> Option<Position> {
-    if area.width <= 2 || area.height <= 2 {
+    if area.width <= INPUT_LEFT_PAD || area.height <= 2 {
         return None;
     }
 
-    let viewport = input_viewport(&app.input, app.cursor_pos, area.width);
-    let inner_width = area.width.saturating_sub(2) as usize;
-    let cursor_col = viewport.cursor_col.min(inner_width.saturating_sub(1));
+    let text_width = area.width.saturating_sub(INPUT_LEFT_PAD);
+    let viewport = input_viewport(&app.input, app.cursor_pos, text_width);
+    let cursor_col = viewport.cursor_col.min(text_width.saturating_sub(1) as usize);
     let cursor_row = viewport
         .cursor_row
         .min(viewport.visible_lines.len().saturating_sub(1));
 
     Some(Position::new(
-        area.x + 1 + cursor_col as u16,
+        area.x + INPUT_LEFT_PAD + cursor_col as u16,
         area.y + 1 + cursor_row as u16,
     ))
 }
 
 pub(crate) fn input_viewport(input: &str, cursor_pos: usize, total_width: u16) -> InputViewport {
-    let inner_width = total_width.saturating_sub(2).max(1) as usize;
+    let inner_width = total_width.max(1) as usize;
     let wrapped = wrap_input(input, cursor_pos, inner_width);
     let visible_rows = wrapped
         .lines
@@ -188,16 +193,20 @@ mod tests {
 
         assert_eq!(
             viewport.visible_lines,
-            vec!["abcdef".to_string(), "ghij".to_string()]
+            vec!["abcdefgh".to_string(), "ij".to_string()]
         );
         assert_eq!(viewport.cursor_row, 1);
-        assert_eq!(viewport.cursor_col, 4);
+        assert_eq!(viewport.cursor_col, 2);
         assert_eq!(input_height("abcdefghij", 10, 8), 4);
     }
 
     #[test]
     fn viewport_scrolls_when_wrapped_content_exceeds_max_height() {
-        let viewport = input_viewport("abcdefghijklmnopqrstuvwxyz0123456789!", 37, 8);
+        let viewport = input_viewport(
+            "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOP!",
+            53,
+            8,
+        );
 
         assert_eq!(viewport.visible_lines.len(), 6);
         assert!(viewport.scroll_row > 0);

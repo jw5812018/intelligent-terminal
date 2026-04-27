@@ -1514,10 +1514,21 @@ async fn run_inner(
     }
 
     // Notify app of connection
-    let (agent_name, agent_model) = summarize_agent_identity(raw_program, args);
+    let (registry_name, agent_model) = summarize_agent_identity(raw_program, args);
+    let agent_version = init_resp
+        .agent_info
+        .as_ref()
+        .map(|info| format!("v{}", info.version));
+    // Prefer the agent's self-reported title/name from ACP over the registry fallback.
+    let agent_name = init_resp
+        .agent_info
+        .as_ref()
+        .and_then(|info| info.title.clone().or_else(|| Some(info.name.clone())))
+        .unwrap_or(registry_name);
     let _ = event_tx.send(AppEvent::AgentConnected {
         name: agent_name,
         model: agent_model,
+        version: agent_version,
         session_id: session_id.to_string(),
     });
 

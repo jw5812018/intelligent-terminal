@@ -276,6 +276,7 @@ pub enum AppEvent {
     AgentConnected {
         name: String,
         model: Option<String>,
+        version: Option<String>,
         session_id: String,
     },
     PromptTemplateLoaded {
@@ -339,6 +340,7 @@ pub struct App {
     pub state: ConnectionState,
     pub agent_name: String,
     pub agent_model: Option<String>,
+    pub agent_version: Option<String>,
     pub prompt_name: Option<String>,
     pub progress_status: Option<String>,
     pub activity_frame: usize,
@@ -416,6 +418,7 @@ impl App {
             state: ConnectionState::Connecting("Starting agent...".to_string()),
             agent_name: String::new(),
             agent_model: None,
+            agent_version: None,
             prompt_name: None,
             progress_status: None,
             activity_frame: 0,
@@ -755,10 +758,12 @@ impl App {
             AppEvent::AgentConnected {
                 name,
                 model,
+                version,
                 session_id,
             } => {
                 self.agent_name = name;
                 self.agent_model = model;
+                self.agent_version = version;
                 self.session_id = session_id;
                 self.state = ConnectionState::Connected;
             }
@@ -2117,6 +2122,7 @@ impl App {
         self.state = snapshot.state;
         self.agent_name = snapshot.agent_name;
         self.agent_model = snapshot.agent_model;
+        self.agent_version = snapshot.agent_version;
         self.prompt_name = snapshot.prompt_name;
         self.progress_status = snapshot.progress_status;
         self.session_id = snapshot.session_id;
@@ -2400,7 +2406,7 @@ mod tests {
         let (recommendation_tx, _recommendation_rx) = tokio::sync::mpsc::unbounded_channel();
         let (permission_tx, _permission_rx) = tokio::sync::mpsc::unbounded_channel();
         let debug_capture = Arc::new(AtomicBool::new(false));
-        App::new(prompt_tx, recommendation_tx, permission_tx, debug_capture, true, false, true)
+        App::new(prompt_tx, recommendation_tx, permission_tx, debug_capture, true, false)
     }
 
     // ─── classify_wt_event ──────────────────────────────────────────────────

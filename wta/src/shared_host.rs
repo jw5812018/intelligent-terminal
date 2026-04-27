@@ -53,6 +53,8 @@ pub struct SharedStateSnapshot {
     #[serde(default)]
     pub agent_model: Option<String>,
     #[serde(default)]
+    pub agent_version: Option<String>,
+    #[serde(default)]
     pub prompt_name: Option<String>,
     #[serde(default)]
     pub progress_status: Option<String>,
@@ -147,6 +149,8 @@ pub enum SharedUiEvent {
         name: String,
         #[serde(default)]
         model: Option<String>,
+        #[serde(default)]
+        version: Option<String>,
         session_id: String,
     },
     PromptTemplateLoaded {
@@ -210,10 +214,12 @@ impl SharedUiEvent {
             AppEvent::AgentConnected {
                 name,
                 model,
+                version,
                 session_id,
             } => Some(Self::AgentConnected {
                 name: name.clone(),
                 model: model.clone(),
+                version: version.clone(),
                 session_id: session_id.clone(),
             }),
             AppEvent::PromptTemplateLoaded { name } => {
@@ -286,10 +292,12 @@ impl SharedUiEvent {
             Self::AgentConnected {
                 name,
                 model,
+                version,
                 session_id,
             } => AppEvent::AgentConnected {
                 name,
                 model,
+                version,
                 session_id,
             },
             Self::PromptTemplateLoaded { name } => AppEvent::PromptTemplateLoaded { name },
@@ -1586,6 +1594,7 @@ struct HostSessionState {
     state: ConnectionState,
     agent_name: String,
     agent_model: Option<String>,
+    agent_version: Option<String>,
     prompt_name: Option<String>,
     progress_status: Option<String>,
     session_id: String,
@@ -1622,6 +1631,7 @@ impl HostSessionState {
             state: ConnectionState::Connecting("Starting agent...".to_string()),
             agent_name: String::new(),
             agent_model: None,
+            agent_version: None,
             prompt_name: None,
             progress_status: None,
             session_id: String::new(),
@@ -1653,6 +1663,7 @@ impl HostSessionState {
             state: self.state.clone(),
             agent_name: self.agent_name.clone(),
             agent_model: self.agent_model.clone(),
+            agent_version: self.agent_version.clone(),
             prompt_name: self.prompt_name.clone(),
             progress_status: self.progress_status.clone(),
             session_id: self.session_id.clone(),
@@ -1814,10 +1825,12 @@ impl HostSessionState {
             AppEvent::AgentConnected {
                 name,
                 model,
+                version,
                 session_id,
             } => {
                 self.agent_name = name;
                 self.agent_model = model;
+                self.agent_version = version;
                 self.session_id = session_id;
                 self.state = ConnectionState::Connected;
                 self.bump();
