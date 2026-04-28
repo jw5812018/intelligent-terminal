@@ -184,7 +184,6 @@ namespace winrt::TerminalApp::implementation
         Windows::Foundation::IAsyncOperation<Windows::Foundation::Collections::IVector<Microsoft::Terminal::Protocol::TabInfo>> GetProtocolTabs();
         Windows::Foundation::IAsyncOperation<Windows::Foundation::Collections::IVector<Microsoft::Terminal::Protocol::PaneInfo>> GetProtocolPanes(uint32_t tabIdFilter);
         Windows::Foundation::IAsyncOperation<Microsoft::Terminal::Protocol::PaneOutput> ReadProtocolPaneOutput(uint32_t paneId, hstring source, int32_t maxLines);
-        Windows::Foundation::IAsyncOperation<Microsoft::Terminal::Protocol::PaneOutput> ReadProtocolPaneLastCommand(uint32_t paneId);
         Windows::Foundation::IAsyncOperation<Microsoft::Terminal::Protocol::ProcessStatus> GetProtocolProcessStatus(uint32_t paneId);
         Windows::Foundation::IAsyncOperation<Microsoft::Terminal::Protocol::SessionVariable> GetProtocolSessionVariable(uint32_t paneId, hstring name);
         Windows::Foundation::IAsyncOperation<bool> SetProtocolSessionVariable(uint32_t paneId, hstring name, hstring value);

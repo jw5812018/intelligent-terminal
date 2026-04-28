@@ -175,7 +175,6 @@ namespace winrt::Microsoft::Terminal::Control::implementation
 
         hstring ReadEntireBuffer() const;
         hstring ReadLastPrompt() const;
-        hstring ReadLastCommandOutput() const;
         Control::CommandHistoryContext CommandHistory() const;
         void UpdateWinGetSuggestions(Windows::Foundation::Collections::IVector<hstring> suggestions);
 

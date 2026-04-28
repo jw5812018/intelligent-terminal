@@ -302,34 +302,6 @@ int main()
         }
     });
 
-    // ── last-command ──
-    std::string lastCommandTarget;
-    auto* lastCommandCmd = app.add_subcommand("last-command", "Capture the most recent shell-integration command")->alias("lastcmd");
-    lastCommandCmd->add_option("-t,--target", lastCommandTarget, "Pane ID");
-    lastCommandCmd->callback([&]() {
-        auto server = connect();
-        if (!server) return;
-        try
-        {
-            auto paneId = ResolvePaneId(server, lastCommandTarget);
-            auto output = server.ReadPaneLastCommand(paneId);
-            if (jsonMode)
-            {
-                PrintJson(PaneOutputToJson(output));
-            }
-            else
-            {
-                auto content = winrt::to_string(output.Content);
-                printf("%s\n", content.c_str());
-            }
-        }
-        catch (const winrt::hresult_error& e)
-        {
-            fprintf(stderr, "ReadPaneLastCommand failed: 0x%08X\n", static_cast<uint32_t>(e.code()));
-            exitCode = 1;
-        }
-    });
-
     // ── pane-status ──
     std::string paneStatusTarget;
     auto* paneStatusCmd = app.add_subcommand("pane-status", "Show pane process status");

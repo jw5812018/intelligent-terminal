@@ -112,11 +112,6 @@ namespace Microsoft.Terminal.Protocol
         TabInfo[] ListTabs(UInt64 windowIdFilter);
         PaneInfo[] ListPanes(UInt64 windowIdFilter, UInt32 tabIdFilter);
         PaneOutput ReadPaneOutput(UInt32 paneId, String source, Int32 maxLines);
-        // Returns the most recent shell-integration command (prompt + command + output)
-        // for the given pane. If the pane has no OSC 133 marks (e.g. shell integration
-        // disabled), HasMarks is false and Content is empty — callers should fall back
-        // to ReadPaneOutput.
-        PaneOutput ReadPaneLastCommand(UInt32 paneId);
         ProcessStatus GetProcessStatus(UInt32 paneId);
         SessionVariable GetSessionVariable(UInt32 paneId, String name);
         String GetSettings();

@@ -276,7 +276,7 @@ namespace winrt::TerminalApp::implementation
                     {
                         // No OSC 133 marks (or no completed prompt yet) —
                         // signal so the caller can fall back to a line-count
-                        // read. Mirrors ReadProtocolPaneLastCommand behavior.
+                        // read. has_marks=false signals the caller to fall back.
                         result.HasMarks = false;
                         result.Content = L"";
                         result.LineCount = 0;
@@ -366,71 +366,6 @@ namespace winrt::TerminalApp::implementation
         }
 
         co_return result;
-    }
-
-    IAsyncOperation<Protocol::PaneOutput> TerminalPage::ReadProtocolPaneLastCommand(uint32_t paneId)
-    {
-        auto strong = get_strong();
-        co_await wil::resume_foreground(Dispatcher());
-
-        Protocol::PaneOutput result{};
-
-        for (const auto& tab : _tabs)
-        {
-            const auto tabImpl = _GetTabImpl(tab);
-            if (!tabImpl)
-                continue;
-
-            const auto rootPane = tabImpl->GetRootPane();
-            if (!rootPane)
-                continue;
-
-            const auto foundPane = rootPane->FindPaneByContentId(paneId);
-            if (!foundPane)
-                continue;
-
-            const auto termControl = foundPane->GetTerminalControl();
-            if (!termControl)
-                co_return result; // PaneId == 0 signals not-ready
-
-            hstring sliced;
-            try
-            {
-                sliced = termControl.ReadLastCommandOutput();
-            }
-            catch (...)
-            {
-                co_return result; // PaneId == 0 signals error
-            }
-
-            result.PaneId = paneId;
-            const auto str = winrt::to_string(sliced);
-            if (str.empty())
-            {
-                // No OSC 133 marks — caller should fall back to ReadPaneOutput.
-                result.HasMarks = false;
-                result.Content = L"";
-                result.LineCount = 0;
-                result.Truncated = false;
-                co_return result;
-            }
-
-            // Count lines for parity with ReadProtocolPaneOutput.
-            int lineCount = 1;
-            for (const auto ch : str)
-            {
-                if (ch == '\n')
-                    lineCount++;
-            }
-
-            result.HasMarks = true;
-            result.Content = sliced;
-            result.LineCount = lineCount;
-            result.Truncated = false;
-            co_return result;
-        }
-
-        co_return result; // not found
     }
 
     IAsyncOperation<Protocol::ProcessStatus> TerminalPage::GetProtocolProcessStatus(uint32_t paneId)

@@ -711,7 +711,7 @@ async fn read_pane_last_message(
     );
 
     let mark_call_started = std::time::Instant::now();
-    let mark_result = shell_mgr.wt_read_pane_last_command(pane_id).await;
+    let mark_result = shell_mgr.wt_read_last_prompt(pane_id).await;
     let mark_call_ms = mark_call_started.elapsed().as_millis() as u64;
 
     match &mark_result {

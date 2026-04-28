@@ -64,7 +64,6 @@ TerminalProtocolComServer : winrt::implements<TerminalProtocolComServer, Protoco
     Protocol::PaneOutput ReadPaneOutput(uint32_t paneId,
                                          winrt::hstring const& source,
                                          int32_t maxLines);
-    Protocol::PaneOutput ReadPaneLastCommand(uint32_t paneId);
     Protocol::ProcessStatus GetProcessStatus(uint32_t paneId);
     Protocol::SessionVariable GetSessionVariable(uint32_t paneId,
                                                    winrt::hstring const& name);

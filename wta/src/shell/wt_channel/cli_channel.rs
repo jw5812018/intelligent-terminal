@@ -216,14 +216,6 @@ impl WtChannel for CliChannel {
                 }
                 self.run_wtcli(&args).await
             }
-            "read_pane_last_command" => {
-                let pane_id = params.get("pane_id").and_then(json_id_as_str).unwrap_or_default();
-                let mut args = vec!["last-command"];
-                if !pane_id.is_empty() {
-                    args.extend(["-t", &pane_id]);
-                }
-                self.run_wtcli(&args).await
-            }
             "get_process_status" => {
                 let pane_id = params.get("pane_id").and_then(json_id_as_str).unwrap_or_default();
                 let mut args = vec!["pane-status"];

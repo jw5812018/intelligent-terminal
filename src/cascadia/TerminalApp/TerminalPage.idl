@@ -113,7 +113,6 @@ namespace TerminalApp
         Windows.Foundation.IAsyncOperation<Windows.Foundation.Collections.IVector<Microsoft.Terminal.Protocol.TabInfo> > GetProtocolTabs();
         Windows.Foundation.IAsyncOperation<Windows.Foundation.Collections.IVector<Microsoft.Terminal.Protocol.PaneInfo> > GetProtocolPanes(UInt32 tabIdFilter);
         Windows.Foundation.IAsyncOperation<Microsoft.Terminal.Protocol.PaneOutput> ReadProtocolPaneOutput(UInt32 paneId, String source, Int32 maxLines);
-        Windows.Foundation.IAsyncOperation<Microsoft.Terminal.Protocol.PaneOutput> ReadProtocolPaneLastCommand(UInt32 paneId);
         Windows.Foundation.IAsyncOperation<Microsoft.Terminal.Protocol.ProcessStatus> GetProtocolProcessStatus(UInt32 paneId);
         Windows.Foundation.IAsyncOperation<Microsoft.Terminal.Protocol.SessionVariable> GetProtocolSessionVariable(UInt32 paneId, String name);
         Windows.Foundation.IAsyncOperation<Boolean> SetProtocolSessionVariable(UInt32 paneId, String name, String value);
