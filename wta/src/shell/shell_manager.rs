@@ -629,6 +629,13 @@ impl ShellManager {
             .await
     }
 
+    /// Switch focus to a pane (switching tab if needed).
+    pub async fn wt_focus_pane(&self, pane_id: &str) -> anyhow::Result<serde_json::Value> {
+        self.wt()?
+            .request("focus_pane", serde_json::json!({ "pane_id": pane_id }))
+            .await
+    }
+
     /// Get process status for a pane.
     pub async fn wt_get_process_status(&self, pane_id: &str) -> anyhow::Result<serde_json::Value> {
         self.wt()?

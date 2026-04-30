@@ -191,6 +191,7 @@ namespace winrt::TerminalApp::implementation
         Windows::Foundation::IAsyncOperation<Microsoft::Terminal::Protocol::TabCreationResult> SplitProtocolPane(uint32_t paneId, Microsoft::Terminal::Settings::Model::SplitDirection direction, float size, Microsoft::Terminal::Settings::Model::NewTerminalArgs args, bool background);
         Windows::Foundation::IAsyncOperation<bool> CloseProtocolPane(uint32_t paneId);
         Windows::Foundation::IAsyncOperation<bool> SendProtocolInput(uint32_t paneId, hstring text);
+        Windows::Foundation::IAsyncOperation<bool> FocusProtocolPane(uint32_t paneId);
         Windows::Foundation::IAsyncOperation<hstring> ShowProtocolQuickPick(hstring title, hstring choicesJson, bool allowFreeInput);
         void OnAutofixStateChanged(hstring eventJson);
         void OnAgentStatusChanged(hstring eventJson);

@@ -73,29 +73,65 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled(format!("  {}", cli_detail), HINT_STYLE),
     ]));
 
-    // Show install hint if CLI not found
+    // Show install hint / install progress if CLI not found
     if matches!(pf.cli_status, CheckStatus::Failed(_)) {
-        if !pf.install_hint.is_empty() {
-            for hint_line in pf.install_hint.lines() {
-                lines.push(Line::from(vec![
-                    Span::styled("      ", HINT_STYLE),
-                    Span::styled(format!("Install: {}", hint_line), HINT_STYLE),
-                ]));
-            }
-        }
-        if !pf.install_url.is_empty() {
+        if setup.install_in_progress {
+            // Spinner + "installing" message
+            let spinner_frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+            let frame = spinner_frames[(app.activity_frame as usize) % spinner_frames.len()];
             lines.push(Line::from(vec![
                 Span::styled("      ", HINT_STYLE),
-                Span::styled(
-                    format!("  Info: {}", pf.install_url),
-                    HINT_STYLE,
-                ),
+                Span::styled(frame, CHECK_STYLE),
+                Span::styled(" Installing GitHub Copilot via winget...", LABEL_STYLE),
             ]));
+            // Show tail of install log
+            for log_line in setup.install_log.iter() {
+                lines.push(Line::from(vec![
+                    Span::styled("        ", HINT_STYLE),
+                    Span::styled(log_line.clone(), HINT_STYLE),
+                ]));
+            }
+        } else {
+            // Install error from previous attempt (if any)
+            if let Some(err) = &setup.install_error {
+                lines.push(Line::from(vec![
+                    Span::styled("      ", HINT_STYLE),
+                    Span::styled("Install failed: ", FAIL_STYLE),
+                    Span::styled(err.clone(), FAIL_STYLE),
+                ]));
+                // Show last few log lines for context
+                for log_line in setup.install_log.iter().rev().take(3).collect::<Vec<_>>().iter().rev() {
+                    lines.push(Line::from(vec![
+                        Span::styled("        ", HINT_STYLE),
+                        Span::styled((*log_line).clone(), HINT_STYLE),
+                    ]));
+                }
+            }
+
+            if !pf.install_hint.is_empty() {
+                for hint_line in pf.install_hint.lines() {
+                    lines.push(Line::from(vec![
+                        Span::styled("      ", HINT_STYLE),
+                        Span::styled(format!("Install: {}", hint_line), HINT_STYLE),
+                    ]));
+                }
+            }
+            if !pf.install_url.is_empty() {
+                lines.push(Line::from(vec![
+                    Span::styled("      ", HINT_STYLE),
+                    Span::styled(
+                        format!("  Info: {}", pf.install_url),
+                        HINT_STYLE,
+                    ),
+                ]));
+            }
             if setup.selected_index == 0 {
-                lines.push(Line::from(Span::styled(
-                    "      [Press Enter to open install page]",
-                    CHECK_STYLE,
-                )));
+                let cta = if setup.install_error.is_some() {
+                    "      [Press Enter to retry install via winget]   [O] open page"
+                } else {
+                    "      [Press Enter to install via winget]   [O] open page"
+                };
+                lines.push(Line::from(Span::styled(cta, CHECK_STYLE)));
             }
         }
     }
@@ -150,11 +186,13 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
         HINT_STYLE,
     )));
 
-    // Tell the user to restart the terminal after fixing.
-    lines.push(Line::from(Span::styled(
-        "  After fixing, close and reopen Windows Terminal.",
-        HINT_STYLE,
-    )));
+    // Footer hint
+    let footer = if matches!(pf.cli_status, CheckStatus::Failed(_)) && pf.agent_id == "copilot" {
+        "  Use ↑/↓ to navigate. Press Enter to install. Esc to quit."
+    } else {
+        "  After fixing, close and reopen Windows Terminal."
+    };
+    lines.push(Line::from(Span::styled(footer, HINT_STYLE)));
 
     let block = Block::default().borders(Borders::NONE);
     let paragraph = Paragraph::new(lines)

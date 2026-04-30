@@ -382,6 +382,18 @@ async fn execute_choice(
                     "{} input to pane {}.",
                     done_label, parent
                 )));
+                // Run is "the user dispatched a command to pane X" — follow
+                // focus to that pane so they can keep typing / observe output
+                // without an extra click. Best-effort: log and ignore on
+                // failure (focus is UX-nice, not correctness-critical).
+                if !insert_only {
+                    if let Err(err) = shell_mgr.wt_focus_pane(parent).await {
+                        coordinator_log(&format!(
+                            "send focus skipped parent={} error={}",
+                            parent, err
+                        ));
+                    }
+                }
             }
             RecommendedAction::OpenAndSend {
                 target,

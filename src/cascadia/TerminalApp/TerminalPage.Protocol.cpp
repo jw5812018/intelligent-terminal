@@ -682,6 +682,44 @@ namespace winrt::TerminalApp::implementation
         co_return false;
     }
 
+    // Switch focus to `paneId`: if it lives in a non-active tab, switch tabs
+    // first; then focus the pane within its tab and programmatically focus
+    // its TermControl. Used by the recommendation executor so that hitting
+    // "Run" follows focus to the destination pane.
+    IAsyncOperation<bool> TerminalPage::FocusProtocolPane(uint32_t paneId)
+    {
+        auto strong = get_strong();
+
+        co_await wil::resume_foreground(Dispatcher());
+
+        for (const auto& tab : _tabs)
+        {
+            const auto tabImpl = _GetTabImpl(tab);
+            if (!tabImpl)
+                continue;
+
+            const auto rootPane = tabImpl->GetRootPane();
+            if (!rootPane)
+                continue;
+
+            const auto foundPane = rootPane->FindPaneByContentId(paneId);
+            if (!foundPane)
+                continue;
+
+            _SetFocusedTab(tab);
+            if (!tabImpl->FocusPane(paneId))
+                co_return false;
+
+            if (const auto termControl = foundPane->GetTerminalControl())
+            {
+                termControl.Focus(winrt::Windows::UI::Xaml::FocusState::Programmatic);
+            }
+            co_return true;
+        }
+
+        co_return false;
+    }
+
     // ============================================================================
     // QuickPick — still uses JSON for the choices parameter (UI-facing, not IPC)
     // ============================================================================

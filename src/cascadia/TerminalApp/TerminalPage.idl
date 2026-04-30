@@ -120,6 +120,7 @@ namespace TerminalApp
         Windows.Foundation.IAsyncOperation<Microsoft.Terminal.Protocol.TabCreationResult> SplitProtocolPane(UInt32 paneId, Microsoft.Terminal.Settings.Model.SplitDirection direction, Single size, Microsoft.Terminal.Settings.Model.NewTerminalArgs args, Boolean background);
         Windows.Foundation.IAsyncOperation<Boolean> CloseProtocolPane(UInt32 paneId);
         Windows.Foundation.IAsyncOperation<Boolean> SendProtocolInput(UInt32 paneId, String text);
+        Windows.Foundation.IAsyncOperation<Boolean> FocusProtocolPane(UInt32 paneId);
         Windows.Foundation.IAsyncOperation<String> ShowProtocolQuickPick(String title, String choicesJson, Boolean allowFreeInput);
         event Windows.Foundation.TypedEventHandler<Object, String> ProtocolVtSequenceReceived;
 

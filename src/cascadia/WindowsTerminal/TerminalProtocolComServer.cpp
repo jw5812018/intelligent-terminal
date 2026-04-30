@@ -616,6 +616,24 @@ void TerminalProtocolComServer::SendInput(
     winrt::throw_hresult(E_FAIL);
 }
 
+void TerminalProtocolComServer::FocusPane(uint32_t paneId)
+{
+    THROW_HR_IF(E_NOT_VALID_STATE, !s_emperor);
+    THROW_HR_IF(E_INVALIDARG, paneId == 0);
+
+    for (const auto& host : s_emperor->GetWindows())
+    {
+        const auto page = _getPage(host.get());
+        if (!page)
+            continue;
+
+        if (page.FocusProtocolPane(paneId).get())
+            return;
+    }
+
+    winrt::throw_hresult(E_FAIL);
+}
+
 void TerminalProtocolComServer::SetSessionVariable(
     uint32_t paneId,
     winrt::hstring const& name,

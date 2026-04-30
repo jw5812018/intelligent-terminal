@@ -121,6 +121,7 @@ namespace Microsoft.Terminal.Protocol
         TabCreationResult SplitPane(UInt32 paneId, String direction, Single size, String profile, String commandline, Boolean background);
         void ClosePane(UInt32 paneId);
         void SendInput(UInt32 paneId, String text);
+        void FocusPane(UInt32 paneId);
         void SetSessionVariable(UInt32 paneId, String name, String value);
         String SetSettings(String settingsContent);
 

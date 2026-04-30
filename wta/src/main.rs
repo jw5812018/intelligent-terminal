@@ -1860,19 +1860,64 @@ async fn run_acp_app(
 
             let shell_mgr_for_recs = Arc::clone(&shell_mgr);
 
-            // Only spawn ACP client if preflight passed
-            if !start_in_setup {
-                let acp_event_tx = event_tx.clone();
-                let shell_mgr_clone = Arc::clone(&shell_mgr);
-                let agent_cmd_clone = agent_cmd.clone();
-                tokio::task::spawn_local(protocol::acp::client::run_acp_client(
-                    agent_cmd_clone,
-                    acp_event_tx,
-                    prompt_rx,
-                    shell_mgr_clone,
-                    wt_connected,
-                ));
-            }
+            // Onboarding install request channel: the App fires this when the user
+            // chooses "Install via winget" from the setup wizard.
+            let (install_req_tx, mut install_req_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+
+            // Single task owns prompt_rx and decides when to spawn the ACP client:
+            // either now (preflight passed) or later (after a successful install).
+            let spawn_event_tx = event_tx.clone();
+            let spawn_shell_mgr = Arc::clone(&shell_mgr);
+            let spawn_agent_cmd = agent_cmd.clone();
+            tokio::task::spawn_local(async move {
+                let mut prompt_rx_opt = Some(prompt_rx);
+                let mut spawned = false;
+
+                if !start_in_setup {
+                    if let Some(rx) = prompt_rx_opt.take() {
+                        tokio::task::spawn_local(protocol::acp::client::run_acp_client(
+                            spawn_agent_cmd.clone(),
+                            spawn_event_tx.clone(),
+                            rx,
+                            Arc::clone(&spawn_shell_mgr),
+                            wt_connected,
+                        ));
+                        spawned = true;
+                    }
+                }
+
+                while let Some(()) = install_req_rx.recv().await {
+                    let _ = spawn_event_tx.send(app::AppEvent::InstallStarted);
+                    let progress_tx = spawn_event_tx.clone();
+                    let result = preflight::winget_install_copilot(move |line| {
+                        let _ = progress_tx.send(app::AppEvent::InstallProgress(line));
+                    })
+                    .await;
+                    let _ = spawn_event_tx
+                        .send(app::AppEvent::InstallComplete(result.clone()));
+
+                    if result.is_ok() && !spawned {
+                        // PATH was refreshed inside winget_install_copilot; rerun preflight.
+                        let new_pf = preflight::check_agent(&spawn_agent_cmd).await;
+                        let all_passed = new_pf.all_passed();
+                        let _ = spawn_event_tx
+                            .send(app::AppEvent::PreflightComplete(new_pf));
+
+                        if all_passed {
+                            if let Some(rx) = prompt_rx_opt.take() {
+                                tokio::task::spawn_local(protocol::acp::client::run_acp_client(
+                                    spawn_agent_cmd.clone(),
+                                    spawn_event_tx.clone(),
+                                    rx,
+                                    Arc::clone(&spawn_shell_mgr),
+                                    wt_connected,
+                                ));
+                                spawned = true;
+                            }
+                        }
+                    }
+                }
+            });
 
             let (recommendation_tx, recommendation_rx) = tokio::sync::mpsc::unbounded_channel();
             let (permission_tx, _permission_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1895,6 +1940,7 @@ async fn run_acp_app(
 
             let autofix_enabled = !cli.no_autofix;
             let mut app_state = app::App::new(prompt_tx, recommendation_tx, permission_tx, debug_capture_enabled, wt_connected, autofix_enabled);
+            app_state.set_install_request_tx(install_req_tx);
 
             // If preflight failed, start in Setup mode
             if start_in_setup {

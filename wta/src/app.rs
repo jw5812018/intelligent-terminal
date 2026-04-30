@@ -110,6 +110,12 @@ pub struct SetupState {
     pub preflight: PreflightResult,
     /// Which check row is currently selected (0 = CLI, 1 = Auth).
     pub selected_index: usize,
+    /// True while a `winget install` task is running.
+    pub install_in_progress: bool,
+    /// Tail of the install command's output (last ~6 lines).
+    pub install_log: Vec<String>,
+    /// Error message from the most recent install attempt (cleared on retry).
+    pub install_error: Option<String>,
 }
 
 // --- WT Event Notification ---
@@ -319,6 +325,12 @@ pub enum AppEvent {
     },
     /// Preflight checks completed — transition from Setup to Chat if all passed.
     PreflightComplete(PreflightResult),
+    /// Onboarding install: install task started.
+    InstallStarted,
+    /// Onboarding install: a line of stdout/stderr from winget.
+    InstallProgress(String),
+    /// Onboarding install: install task finished. Ok = success, Err = error message.
+    InstallComplete(Result<(), String>),
 }
 
 // --- Per-tab session storage ---
@@ -402,6 +414,8 @@ pub struct App {
     inflight_autofix_generation: Option<u64>,
     // Per-tab conversation sessions. Keyed by tab_id string (0-based index).
     tab_sessions: HashMap<String, TabSession>,
+    // Onboarding: signals main.rs to spawn `winget install GitHub.Copilot`.
+    install_request_tx: Option<mpsc::UnboundedSender<()>>,
 }
 
 impl App {
@@ -469,7 +483,13 @@ impl App {
             autofix_generation: 0,
             inflight_autofix_generation: None,
             tab_sessions: HashMap::new(),
+            install_request_tx: None,
         }
+    }
+
+    /// Wire up the channel that signals main.rs to spawn `winget install`.
+    pub fn set_install_request_tx(&mut self, tx: mpsc::UnboundedSender<()>) {
+        self.install_request_tx = Some(tx);
     }
 
     pub async fn run(
@@ -663,6 +683,9 @@ impl App {
             AppEvent::SharedStateSnapshot(_) => "shared_state_snapshot",
             AppEvent::WtEvent { .. } => "wt_event",
             AppEvent::PreflightComplete(_) => "preflight_complete",
+            AppEvent::InstallStarted => "install_started",
+            AppEvent::InstallProgress(_) => "install_progress",
+            AppEvent::InstallComplete(_) => "install_complete",
         }
     }
 
@@ -817,6 +840,9 @@ impl App {
                     self.setup = Some(SetupState {
                         preflight,
                         selected_index: 1, // select auth row
+                        install_in_progress: false,
+                        install_log: Vec::new(),
+                        install_error: None,
                     });
                     self.state = ConnectionState::Disconnected;
                     self.publish_agent_status();
@@ -1103,6 +1129,36 @@ impl App {
                     self.wt_notifications.pop_front();
                 }
             }
+            AppEvent::InstallStarted => {
+                if let Some(ref mut setup) = self.setup {
+                    setup.install_in_progress = true;
+                    setup.install_error = None;
+                }
+            }
+            AppEvent::InstallProgress(line) => {
+                if let Some(ref mut setup) = self.setup {
+                    setup.install_log.push(line);
+                    // Cap to last ~8 lines so the UI doesn't grow unbounded.
+                    let len = setup.install_log.len();
+                    if len > 8 {
+                        setup.install_log.drain(0..len - 8);
+                    }
+                }
+            }
+            AppEvent::InstallComplete(result) => {
+                if let Some(ref mut setup) = self.setup {
+                    setup.install_in_progress = false;
+                    match result {
+                        Ok(()) => {
+                            setup.install_log.push("Installation complete.".to_string());
+                            setup.install_error = None;
+                        }
+                        Err(err) => {
+                            setup.install_error = Some(err);
+                        }
+                    }
+                }
+            }
             AppEvent::PreflightComplete(result) => {
                 if result.all_passed() {
                     // All checks passed — transition to Chat mode
@@ -1110,11 +1166,19 @@ impl App {
                     self.setup = None;
                     self.state = ConnectionState::Connecting("Starting agent...".to_string());
                 } else {
-                    // Show the setup wizard
+                    // Show the setup wizard. Preserve any install state so the user
+                    // sees the result of a just-finished install attempt.
+                    let (install_log, install_error) = match self.setup.take() {
+                        Some(prev) => (prev.install_log, prev.install_error),
+                        None => (Vec::new(), None),
+                    };
                     self.mode = AppMode::Setup;
                     self.setup = Some(SetupState {
                         preflight: result,
                         selected_index: 0,
+                        install_in_progress: false,
+                        install_log,
+                        install_error,
                     });
                     self.state = ConnectionState::Disconnected;
                 }
@@ -1298,6 +1362,13 @@ impl App {
             KeyCode::Esc if self.input.is_empty() => {
                 self.collapse_selected_history_turn();
             }
+            KeyCode::Esc => {
+                self.input.clear();
+                self.cursor_pos = 0;
+            }
+            KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                self.insert_input_char('\n');
+            }
             KeyCode::Enter => {
                 tracing::debug!(target: "autofix", input_empty = self.input.is_empty(), state = ?self.state, has_recs = self.recommendations.is_some(), autofix_pane = ?self.autofix_pane_id, selected_idx = self.selected_recommendation, "Enter");
                 if self.input.is_empty()
@@ -1390,6 +1461,12 @@ impl App {
             KeyCode::Delete => {
                 self.delete_at_cursor();
             }
+            KeyCode::Left if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.move_cursor_word_left();
+            }
+            KeyCode::Right if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.move_cursor_word_right();
+            }
             KeyCode::Left => {
                 self.move_cursor_left();
             }
@@ -1424,7 +1501,34 @@ impl App {
                 self.should_quit = true;
             }
             KeyCode::Enter => {
-                // Open install URL based on selected row
+                // Trigger winget install when the CLI row is selected and CLI is missing.
+                let should_install = self
+                    .setup
+                    .as_ref()
+                    .map(|s| {
+                        s.selected_index == 0
+                            && s.preflight.cli_status != CheckStatus::Passed
+                            && !s.install_in_progress
+                            && s.preflight.agent_id == "copilot"
+                    })
+                    .unwrap_or(false);
+
+                if should_install {
+                    if let Some(tx) = &self.install_request_tx {
+                        let _ = tx.send(());
+                        if let Some(ref mut setup) = self.setup {
+                            setup.install_in_progress = true;
+                            setup.install_error = None;
+                            setup.install_log.clear();
+                            setup
+                                .install_log
+                                .push("Starting GitHub Copilot installation...".to_string());
+                        }
+                    }
+                }
+            }
+            KeyCode::Char('o') | KeyCode::Char('O') => {
+                // Open install page in browser as a fallback.
                 if let Some(ref setup) = self.setup {
                     if setup.selected_index == 0
                         && setup.preflight.cli_status != CheckStatus::Passed
@@ -1459,7 +1563,14 @@ impl App {
     }
 
     fn has_activity_indicator(&self) -> bool {
-        self.prompt_in_flight || self.agent_streaming || self.progress_status.is_some()
+        self.prompt_in_flight
+            || self.agent_streaming
+            || self.progress_status.is_some()
+            || self
+                .setup
+                .as_ref()
+                .map(|s| s.install_in_progress)
+                .unwrap_or(false)
     }
 
     /// Get the most recent unacknowledged notification (for the banner).
@@ -1529,6 +1640,14 @@ impl App {
 
     fn move_cursor_right(&mut self) {
         self.cursor_pos = next_char_boundary(&self.input, self.cursor_pos);
+    }
+
+    fn move_cursor_word_left(&mut self) {
+        self.cursor_pos = prev_word_boundary(&self.input, self.cursor_pos);
+    }
+
+    fn move_cursor_word_right(&mut self) {
+        self.cursor_pos = next_word_boundary(&self.input, self.cursor_pos);
     }
 
     /// Height of the recommendations panel — grows to fit content, capped at 40% of pane height.
@@ -2222,6 +2341,9 @@ impl App {
                 self.setup = Some(SetupState {
                     preflight,
                     selected_index: 1,
+                    install_in_progress: false,
+                    install_log: Vec::new(),
+                    install_error: None,
                 });
                 self.state = ConnectionState::Disconnected;
                 return;
@@ -2577,6 +2699,60 @@ fn next_char_boundary(input: &str, cursor_pos: usize) -> usize {
         .unwrap_or(input.len())
 }
 
+fn is_word_char(ch: char) -> bool {
+    ch.is_alphanumeric() || ch == '_'
+}
+
+fn next_word_boundary(input: &str, cursor_pos: usize) -> usize {
+    let cursor_pos = clamp_cursor_to_boundary(input, cursor_pos);
+    if cursor_pos >= input.len() {
+        return input.len();
+    }
+
+    let mut i = cursor_pos;
+    while i < input.len() {
+        let ch = input[i..].chars().next().unwrap();
+        if is_word_char(ch) {
+            break;
+        }
+        i += ch.len_utf8();
+    }
+    while i < input.len() {
+        let ch = input[i..].chars().next().unwrap();
+        if !is_word_char(ch) {
+            break;
+        }
+        i += ch.len_utf8();
+    }
+    i
+}
+
+fn prev_word_boundary(input: &str, cursor_pos: usize) -> usize {
+    let cursor_pos = clamp_cursor_to_boundary(input, cursor_pos);
+    if cursor_pos == 0 {
+        return 0;
+    }
+
+    let mut i = cursor_pos;
+    while i > 0 {
+        let prev = prev_char_boundary(input, i);
+        let ch = input[prev..].chars().next().unwrap();
+        if is_word_char(ch) {
+            break;
+        }
+        i = prev;
+    }
+    while i > 0 {
+        let prev = prev_char_boundary(input, i);
+        let ch = input[prev..].chars().next().unwrap();
+        if !is_word_char(ch) {
+            break;
+        }
+        i = prev;
+    }
+    i
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2589,6 +2765,67 @@ mod tests {
         let (permission_tx, _permission_rx) = tokio::sync::mpsc::unbounded_channel();
         let debug_capture = Arc::new(AtomicBool::new(false));
         App::new(prompt_tx, recommendation_tx, permission_tx, debug_capture, true, false)
+    }
+
+    // ─── word boundary helpers ──────────────────────────────────────────────
+
+    #[test]
+    fn next_word_jumps_to_end_of_current_then_next_word() {
+        let s = "hello world";
+        // Start of input → end of "hello".
+        assert_eq!(next_word_boundary(s, 0), 5);
+        // Inside "hello" → end of "hello".
+        assert_eq!(next_word_boundary(s, 2), 5);
+        // On the space → end of "world".
+        assert_eq!(next_word_boundary(s, 5), 11);
+        // End of input → stays.
+        assert_eq!(next_word_boundary(s, 11), 11);
+    }
+
+    #[test]
+    fn prev_word_jumps_to_start_of_current_then_previous_word() {
+        let s = "hello world";
+        // End of input → start of "world".
+        assert_eq!(prev_word_boundary(s, 11), 6);
+        // On 'w' → start of "hello".
+        assert_eq!(prev_word_boundary(s, 6), 0);
+        // Inside "world" → start of "world".
+        assert_eq!(prev_word_boundary(s, 9), 6);
+        // Start of input → stays.
+        assert_eq!(prev_word_boundary(s, 0), 0);
+    }
+
+    #[test]
+    fn word_boundary_skips_punctuation_runs() {
+        let s = "foo --bar baz";
+        // After "foo" → skip space + "--", land at end of "bar".
+        assert_eq!(next_word_boundary(s, 3), 9);
+        // From end of "bar" backwards → start of "bar".
+        assert_eq!(prev_word_boundary(s, 9), 6);
+    }
+
+    #[test]
+    fn word_boundary_handles_multibyte_chars() {
+        // "你好 world" — each Chinese char is 3 bytes in UTF-8.
+        let s = "你好 world";
+        assert_eq!(s.len(), 12);
+        // Start → end of "你好" (after 2 CJK chars = byte 6).
+        assert_eq!(next_word_boundary(s, 0), 6);
+        // From end → start of "world" at byte 7.
+        assert_eq!(prev_word_boundary(s, 12), 7);
+        // From byte 7 (start of "world") → start of "你好" at byte 0.
+        assert_eq!(prev_word_boundary(s, 7), 0);
+    }
+
+    #[test]
+    fn word_boundary_handles_newlines() {
+        let s = "foo\nbar";
+        // From start → end of "foo".
+        assert_eq!(next_word_boundary(s, 0), 3);
+        // On '\n' → end of "bar".
+        assert_eq!(next_word_boundary(s, 3), 7);
+        // From end → start of "bar".
+        assert_eq!(prev_word_boundary(s, 7), 4);
     }
 
     // ─── classify_wt_event ──────────────────────────────────────────────────

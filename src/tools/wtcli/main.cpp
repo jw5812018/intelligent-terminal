@@ -465,6 +465,36 @@ int main()
         }
     });
 
+    // ── focus-pane ──
+    std::string focusPaneTarget;
+    auto* focusPaneCmd = app.add_subcommand("focus-pane", "Switch focus to a pane")->alias("focusp");
+    focusPaneCmd->add_option("-t,--target", focusPaneTarget, "Pane ID");
+    focusPaneCmd->callback([&]() {
+        auto server = connect();
+        if (!server) return;
+        try
+        {
+            auto paneId = ResolvePaneId(server, focusPaneTarget);
+            server.FocusPane(paneId);
+            if (jsonMode)
+            {
+                Json::Value v;
+                v["ok"] = true;
+                v["pane_id"] = static_cast<Json::UInt>(paneId);
+                PrintJson(v);
+            }
+            else
+            {
+                printf("Focused pane %u.\n", paneId);
+            }
+        }
+        catch (const winrt::hresult_error& e)
+        {
+            fprintf(stderr, "FocusPane failed: 0x%08X\n", static_cast<uint32_t>(e.code()));
+            exitCode = 1;
+        }
+    });
+
     // ── test-pipe ──
     auto* testPipeCmd = app.add_subcommand("test-pipe", "Test connection to Windows Terminal");
     testPipeCmd->callback([&]() {

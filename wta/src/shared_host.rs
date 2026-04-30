@@ -280,7 +280,10 @@ impl SharedUiEvent {
             | AppEvent::SharedStateSnapshot(_)
             | AppEvent::SharedPermissionRequest { .. }
             | AppEvent::PermissionCleared
-            | AppEvent::PreflightComplete(_) => None,
+            | AppEvent::PreflightComplete(_)
+            | AppEvent::InstallStarted
+            | AppEvent::InstallProgress(_)
+            | AppEvent::InstallComplete(_) => None,
             AppEvent::UserMessage(_) | AppEvent::MouseScroll { .. } => None,
         }
     }
@@ -1967,6 +1970,9 @@ impl HostSessionState {
             | AppEvent::SharedPermissionRequest { .. }
             | AppEvent::PermissionCleared
             | AppEvent::PreflightComplete(_)
+            | AppEvent::InstallStarted
+            | AppEvent::InstallProgress(_)
+            | AppEvent::InstallComplete(_)
             | AppEvent::Tick
             | AppEvent::Key(_)
             | AppEvent::MouseScroll { .. }

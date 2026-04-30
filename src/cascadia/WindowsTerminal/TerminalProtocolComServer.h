@@ -84,6 +84,7 @@ TerminalProtocolComServer : winrt::implements<TerminalProtocolComServer, Protoco
                                            bool background);
     void ClosePane(uint32_t paneId);
     void SendInput(uint32_t paneId, winrt::hstring const& text);
+    void FocusPane(uint32_t paneId);
     void SetSessionVariable(uint32_t paneId,
                             winrt::hstring const& name,
                             winrt::hstring const& value);

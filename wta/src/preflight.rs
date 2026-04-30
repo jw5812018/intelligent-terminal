@@ -203,6 +203,109 @@ async fn check_auth(auth_check_command: &str) -> CheckStatus {
     }
 }
 
+/// Refresh this process's PATH environment variable from the Windows registry.
+/// Useful after a `winget install` so subsequent child processes inherit the
+/// updated PATH (and `resolve_bare_agent_name` finds the new binary).
+pub fn refresh_process_path() {
+    let path = fresh_path();
+    if !path.is_empty() {
+        std::env::set_var("PATH", &path);
+        preflight_log(&format!("refresh_process_path: PATH refreshed (len={})", path.len()));
+    }
+}
+
+/// Run `winget install --id GitHub.Copilot ...`, streaming each output line via
+/// `on_line`. Returns Ok on exit code 0, Err otherwise.  On success, refreshes
+/// this process's PATH so subsequent spawns find the new binary.
+pub async fn winget_install_copilot<F>(mut on_line: F) -> Result<(), String>
+where
+    F: FnMut(String) + Send + 'static,
+{
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    use std::process::Stdio;
+
+    let mut cmd = tokio::process::Command::new("winget");
+    cmd.args([
+        "install",
+        "--id",
+        "GitHub.Copilot",
+        "--exact",
+        "--silent",
+        "--accept-package-agreements",
+        "--accept-source-agreements",
+        "--disable-interactivity",
+    ])
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
+
+    // Hide the winget window if any console pop-up tries to spawn.
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    on_line("Running: winget install GitHub.Copilot".to_string());
+
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            return Err(format!("Failed to launch winget: {}. Is winget on PATH?", e));
+        }
+    };
+
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+
+    let (line_tx, mut line_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+
+    if let Some(stdout) = stdout {
+        let tx = line_tx.clone();
+        tokio::spawn(async move {
+            let mut reader = BufReader::new(stdout).lines();
+            while let Ok(Some(line)) = reader.next_line().await {
+                let _ = tx.send(line);
+            }
+        });
+    }
+    if let Some(stderr) = stderr {
+        let tx = line_tx.clone();
+        tokio::spawn(async move {
+            let mut reader = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = reader.next_line().await {
+                let _ = tx.send(line);
+            }
+        });
+    }
+    drop(line_tx);
+
+    // Forward lines to caller while the process runs.
+    let forward = tokio::spawn(async move {
+        while let Some(line) = line_rx.recv().await {
+            let trimmed = line.trim_end_matches('\r').to_string();
+            if !trimmed.is_empty() {
+                on_line(trimmed);
+            }
+        }
+    });
+
+    let status = match child.wait().await {
+        Ok(s) => s,
+        Err(e) => return Err(format!("winget exited unexpectedly: {}", e)),
+    };
+
+    let _ = forward.await;
+
+    if status.success() {
+        refresh_process_path();
+        Ok(())
+    } else {
+        let code = status.code().unwrap_or(-1);
+        Err(format!("winget install failed (exit code {})", code))
+    }
+}
+
 /// Read the current PATH by combining the system and user PATH values from the
 /// Windows registry.  This picks up programs installed after this process started.
 /// Falls back to the process's inherited PATH if registry reads fail.

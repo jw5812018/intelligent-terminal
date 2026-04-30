@@ -274,6 +274,10 @@ impl WtChannel for CliChannel {
                 let pane_id = params.get("pane_id").and_then(json_id_as_str).unwrap_or_default();
                 self.run_wtcli(&["kill-pane", "-t", &pane_id]).await
             }
+            "focus_pane" => {
+                let pane_id = params.get("pane_id").and_then(json_id_as_str).unwrap_or_default();
+                self.run_wtcli(&["focus-pane", "-t", &pane_id]).await
+            }
             "send_input" => {
                 let pane_id = params.get("pane_id").and_then(json_id_as_str).unwrap_or_default();
                 let text = params.get("text").and_then(|v| v.as_str()).unwrap_or("");
