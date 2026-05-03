@@ -49,9 +49,22 @@ pub fn render(frame: &mut Frame, app: &App) {
         .constraints([Constraint::Length(1), Constraint::Min(0), Constraint::Length(1)])
         .split(chunks[1]);
 
-    chat::render(frame, app, h_chat[1]);
-    recommendations::render(frame, app, h_rec[1]);
-    input::render(frame, app, chunks[2]);
+    match app.current_view {
+        crate::app::View::Chat => {
+            chat::render(frame, app, h_chat[1]);
+            recommendations::render(frame, app, h_rec[1]);
+            input::render(frame, app, chunks[2]);
+        }
+        crate::app::View::Agents => {
+            let mut state = app.agents_list_state.clone();
+            super::agents_view::render(
+                frame,
+                chunks[0],
+                &app.agent_sessions,
+                &mut state,
+            );
+        }
+    }
 
     if let Some(debug_area) = debug_area {
         debug_panel::render(frame, app, debug_area);

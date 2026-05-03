@@ -424,6 +424,12 @@ struct TabSession {
 
 // --- App ---
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum View {
+    Chat,
+    Agents,
+}
+
 pub struct App {
     pub mode: AppMode,
     pub setup: Option<SetupState>,
@@ -477,6 +483,8 @@ pub struct App {
     pub source_cwd: Option<String>,
     // Agent session registry (tracks CLI-agent panes)
     pub agent_sessions: crate::agent_sessions::AgentSessionRegistry,
+    pub current_view: View,
+    pub agents_list_state: ratatui::widgets::ListState,
     current_prompt_text: Option<String>,
     pending_completed_turn: Option<CompletedTurn>,
     // WT event notifications
@@ -563,6 +571,12 @@ impl App {
             source_session_id: None,
             source_cwd: None,
             agent_sessions: crate::agent_sessions::AgentSessionRegistry::new(),
+            current_view: View::Chat,
+            agents_list_state: {
+                let mut s = ratatui::widgets::ListState::default();
+                s.select(Some(0));
+                s
+            },
             current_prompt_text: None,
             pending_completed_turn: None,
             wt_notifications: VecDeque::new(),
@@ -1336,6 +1350,36 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent) {
+        match (key.code, key.modifiers) {
+            (crossterm::event::KeyCode::F(2), crossterm::event::KeyModifiers::NONE)
+            | (crossterm::event::KeyCode::Tab, crossterm::event::KeyModifiers::CONTROL) => {
+                self.current_view = match self.current_view {
+                    View::Chat   => View::Agents,
+                    View::Agents => View::Chat,
+                };
+                return;
+            }
+            _ => {}
+        }
+
+        if self.current_view == View::Agents {
+            let count = self.agent_sessions.iter_sorted().len();
+            match key.code {
+                crossterm::event::KeyCode::Down => {
+                    let cur = self.agents_list_state.selected().unwrap_or(0);
+                    let next = if count == 0 { 0 } else { (cur + 1).min(count - 1) };
+                    self.agents_list_state.select(Some(next));
+                    return;
+                }
+                crossterm::event::KeyCode::Up => {
+                    let cur = self.agents_list_state.selected().unwrap_or(0);
+                    self.agents_list_state.select(Some(cur.saturating_sub(1)));
+                    return;
+                }
+                _ => {}
+            }
+        }
+
         // If in setup mode, route keys to setup handler
         if self.mode == AppMode::Setup {
             self.handle_setup_key(key);
@@ -3023,7 +3067,45 @@ mod tests {
         let debug_capture = Arc::new(AtomicBool::new(false));
         let mut app = App::new(prompt_tx, recommendation_tx, permission_tx, debug_capture, true, true, false);
         app.agent_sessions = crate::agent_sessions::AgentSessionRegistry::new();
+        app.current_view = View::Chat;
+        app.agents_list_state.select(Some(0));
         app
+    }
+
+    #[test]
+    fn f2_toggles_between_chat_and_agents_view() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut app = test_app();
+        assert_eq!(app.current_view, View::Chat);
+
+        app.handle_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
+        assert_eq!(app.current_view, View::Agents);
+
+        app.handle_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
+        assert_eq!(app.current_view, View::Chat);
+    }
+
+    #[test]
+    fn arrow_keys_move_cursor_in_agents_view() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use crate::agent_sessions::{CliSource, SessionEvent};
+        use std::path::PathBuf;
+        let mut app = test_app();
+        app.agent_sessions.apply(SessionEvent::SessionStarted {
+            key: "a".into(), cli_source: CliSource::Claude,
+            pane_session_id: "p1".into(), cwd: PathBuf::from("/x"), title: "t".into(),
+        });
+        app.agent_sessions.apply(SessionEvent::SessionStarted {
+            key: "b".into(), cli_source: CliSource::Copilot,
+            pane_session_id: "p2".into(), cwd: PathBuf::from("/y"), title: "u".into(),
+        });
+        app.current_view = View::Agents;
+
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.agents_list_state.selected(), Some(1));
+
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(app.agents_list_state.selected(), Some(0));
     }
 
     // ─── word boundary helpers ──────────────────────────────────────────────

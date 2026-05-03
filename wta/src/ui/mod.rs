@@ -5,6 +5,7 @@ mod layout;
 mod permission;
 mod recommendations;
 pub mod setup;
+pub mod agents_view;
 
 pub use layout::input_cursor_position;
 pub use layout::render;
