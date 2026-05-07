@@ -1,5 +1,43 @@
-# send-event.ps1 — Forward Copilot CLI hook events to WTA via wtcli
-param([string]$EventType = "agent.hook")
+# send-event.ps1 — Forward CLI agent hook events to WTA via wtcli.
+#
+# Two distinct GUIDs flow through this script — DO NOT conflate them:
+#
+#   1. PANE session id  (= $env:WT_SESSION, set per-pane by ConptyConnection):
+#      Identifies the Windows Terminal pane the agent is running in.
+#      Used by the COM broadcast as `params.session_id`, and by wta's
+#      `route_agent_event_to_registry` / `dispatch_focus_pane` for routing.
+#      We pass it explicitly via `wtcli send-event -p <guid>`. Without
+#      `-p`, wtcli falls back to `GetActivePane()` which is the *currently
+#      focused* pane — that is wrong for hooks, which fire from a
+#      backgrounded agent pane while the user looks elsewhere (and in
+#      particular, can be the wta agent pane itself, in which case wta
+#      drops the event as "from our own pane" and the row stays IDLE).
+#
+#   2. AGENT session id (Claude/Gemini UUID, Copilot folder name):
+#      Identifies the CLI agent's own conversation. Used as the resume
+#      identifier (`claude --resume <id>`, `gemini --resume <id>`,
+#      copilot's session-state directory) and as the registry key in
+#      wta when known. Travels in the wrapped payload as
+#      `agent_session_id`.
+#
+# CLI-source identification:
+#   The installer hard-codes which CLI invokes this script via the
+#   `-CliSource` parameter (claude / copilot / gemini). That is the
+#   ONLY reliable signal — env-var heuristics are unreliable because:
+#     * Claude registers as TOP-LEVEL hooks (~/.claude/settings.json),
+#       not via the plugin loader, so CLAUDE_PLUGIN_ROOT is unset.
+#     * Claude doesn't export CLAUDE_SESSION_ID; the session id is
+#       only in stdin JSON.
+#     * Copilot CLI inherits Claude's plugin shape, so CLAUDE_PLUGIN_ROOT
+#       is set when Copilot loads our plugin — making it indistinguishable
+#       from a real Claude run by env vars alone.
+#   Without `-CliSource`, Claude hook events were silently mis-tagged
+#   as "copilot" (the historical default fallback below) and rows
+#   showed the wrong CLI label / icon in F2.
+param(
+    [string]$EventType = "agent.hook",
+    [string]$CliSource = ""
+)
 
 # Skip if not running inside Windows Terminal
 if (-not $env:WT_COM_CLSID) { exit 0 }
@@ -49,21 +87,30 @@ try {
         $agentSessionId = $env:GEMINI_SESSION_ID
     }
 
-    # Detect CLI source: prefer WTA_CLI_SOURCE (set by bash hooks); else use the
-    # CLI-specific session-id env var (most reliable: only that CLI sets it);
-    # only fall back to CLAUDE_PLUGIN_ROOT if no session-id was found, since
-    # Copilot CLI also sets CLAUDE_PLUGIN_ROOT (its plugin format borrows from
-    # Claude), which would otherwise mis-tag Copilot sessions as Claude.
-    $cliSource = $env:WTA_CLI_SOURCE
-    if (-not $cliSource) {
-        if     ($env:COPILOT_SESSION_ID) { $cliSource = "copilot" }
-        elseif ($env:GEMINI_SESSION_ID)  { $cliSource = "gemini" }
-        elseif ($env:CLAUDE_SESSION_ID)  { $cliSource = "claude" }
-        elseif ($env:GEMINI_CLI)         { $cliSource = "gemini" }
-        elseif ($env:COPILOT_CLI)        { $cliSource = "copilot" }
-        elseif ($env:CLAUDE_PLUGIN_ROOT) { $cliSource = "claude" }
-        else { $cliSource = "copilot" }
+    # Detect CLI source — priority order:
+    #   1. The `-CliSource` script parameter (set by the installer per-CLI;
+    #      most reliable: hard-coded at install time, not affected by
+    #      env-var leakage between CLIs that share Claude's plugin shape).
+    #   2. WTA_CLI_SOURCE env var (manual override / bash hooks).
+    #   3. CLI-specific session-id env vars (only that CLI sets each one).
+    #   4. CLI-specific marker env vars.
+    #   5. CLAUDE_PLUGIN_ROOT — last resort BEFORE the default. Note that
+    #      Copilot also sets this when loading our plugin, so this matches
+    #      Claude only when COPILOT_SESSION_ID was already absent above.
+    #   6. Default "copilot" — LEGACY fallback; should never be hit when
+    #      installer plumbing is correct, but kept so a manual / external
+    #      invocation without -CliSource doesn't crash.
+    if (-not $CliSource) { $CliSource = $env:WTA_CLI_SOURCE }
+    if (-not $CliSource) {
+        if     ($env:COPILOT_SESSION_ID) { $CliSource = "copilot" }
+        elseif ($env:GEMINI_SESSION_ID)  { $CliSource = "gemini" }
+        elseif ($env:CLAUDE_SESSION_ID)  { $CliSource = "claude" }
+        elseif ($env:GEMINI_CLI)         { $CliSource = "gemini" }
+        elseif ($env:COPILOT_CLI)        { $CliSource = "copilot" }
+        elseif ($env:CLAUDE_PLUGIN_ROOT) { $CliSource = "claude" }
+        else { $CliSource = "copilot" }
     }
+    $cliSource = $CliSource
 
     $wrapper = @{
         cli_source       = $cliSource
@@ -96,9 +143,20 @@ try {
     if ($bsRun -gt 0) { [void]$sb.Append([string]'\' * ($bsRun * 2)) }
     $escaped = $sb.ToString()
 
+    # Pin the originating pane explicitly via -p $env:WT_SESSION when
+    # available. WT_SESSION is set per-pane by ConptyConnection.cpp and is
+    # the same GUID returned by IProtocolServer::GetActivePane().SessionId
+    # for that pane. Passing it removes wtcli's fallback to "currently
+    # focused pane", which is essential for Notification/Stop hooks that
+    # fire while the user is in a *different* pane.
+    $paneArg = ""
+    if ($env:WT_SESSION) {
+        $paneArg = " -p `"$($env:WT_SESSION)`""
+    }
+
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $wtcliPath
-    $psi.Arguments = "send-event -e $EventType `"$escaped`""
+    $psi.Arguments = "send-event$paneArg -e $EventType `"$escaped`""
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $true
     $psi.RedirectStandardError = $true

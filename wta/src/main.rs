@@ -1,5 +1,6 @@
 mod agent_registry;
 mod agent_sessions;
+mod claude_hooks_installer;
 mod history_loader;
 mod app;
 mod coordinator;
@@ -90,6 +91,17 @@ enum Command {
     /// Test pipe connection to Windows Terminal
     TestPipe,
 
+    /// (Re-)install the wt-agent-hooks bridge into Claude Code and Copilot CLI.
+    ///
+    /// Runs the same idempotent install routine that fires automatically on
+    /// every wta startup. Useful as a repair tool when a CLI's settings.json
+    /// has lost the `hooks` block or the plugin registration entry, or when
+    /// upgrading from an older wta build that wrote a stale path.
+    ///
+    /// Exits 0 even if a CLI is not installed — only writes for present
+    /// `~/.claude/` and `~/.copilot/` directories.
+    InstallHooks,
+
     /// List all Windows Terminal windows
     #[command(alias = "lsw")]
     ListWindows,
@@ -138,7 +150,9 @@ enum Command {
         target: Option<String>,
 
         /// Split horizontally (panes side by side)
-        #[arg(short = 'h', long)]
+        // Note: no short alias — `-h` is reserved by clap's auto-generated
+        // `--help` flag and would panic clap's debug_asserts at startup.
+        #[arg(long)]
         horizontal: bool,
 
         /// Split vertically (panes stacked)
@@ -346,6 +360,19 @@ async fn main() -> Result<()> {
         // Subcommand aliases for legacy modes
         Some(Command::Info) => run_info_mode(&pipe_override).await,
         Some(Command::TestPipe) => run_test_pipe(&pipe_override).await,
+
+        // Run the hooks installer manually. Useful as a repair tool: the
+        // same routine fires automatically on every wta startup, but if a
+        // CLI's settings.json has drifted (e.g. user removed our entry by
+        // hand, or upgraded from an older wta) running this subcommand
+        // resets it without launching the full agent pane.
+        Some(Command::InstallHooks) => {
+            claude_hooks_installer::ensure_installed();
+            println!("wt-agent-hooks install attempted (idempotent). \
+                Inspect ~/.claude/settings.json and ~/.copilot/settings.json \
+                to confirm.");
+            Ok(())
+        }
 
         // ── List commands ──
         Some(Command::ListWindows) => {
@@ -1724,6 +1751,7 @@ async fn run_attach_tui(
                 autofix_enabled,
                 log_agent_events,
             );
+            app_state.set_app_event_tx(event_tx.clone());
             let _ = dismiss_autofix_tx; // was used for shared_mode dismiss; no longer needed
 
             // If preflight failed, enter Setup mode with static guidance
@@ -2204,6 +2232,7 @@ async fn run_acp_app(
                 .unwrap_or(false);
             let mut app_state = app::App::new(prompt_tx, recommendation_tx, permission_tx, debug_capture_enabled, wt_connected, autofix_enabled, log_agent_events);
             app_state.set_install_request_tx(install_req_tx);
+            app_state.set_app_event_tx(event_tx.clone());
 
             // If preflight failed, start in Setup mode
             if start_in_setup {

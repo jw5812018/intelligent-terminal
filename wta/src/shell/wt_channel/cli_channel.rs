@@ -140,6 +140,25 @@ pub fn spawn_wtcli_async(args: &[String]) {
 /// The args slice is the subcommand + its options (e.g. `["split-pane", "-c",
 /// "<commandline>"]`). `--json` is prepended automatically.
 pub fn spawn_wtcli_split_then_focus(args: &[String]) {
+    spawn_wtcli_split_then_focus_with_callback(args, None);
+}
+
+/// Variant of [`spawn_wtcli_split_then_focus`] that also delivers the new
+/// pane's GUID to a caller-supplied callback after parsing it from stdout
+/// (and before issuing the follow-up `focus-pane`). Used by `dispatch_resume`
+/// so the agent session registry can bind the resumed pane to its row even
+/// for CLIs without a hook bridge (Gemini): without this binding, the
+/// `connection_state: closed` → `PaneClosed` path can't transition the row
+/// to Ended when the user later closes the pane.
+///
+/// The callback runs on the same background thread that issued the split,
+/// after a successful JSON parse. It is NOT invoked when the split fails
+/// (process spawn error, non-zero exit, malformed JSON, missing
+/// `session_id`).
+pub fn spawn_wtcli_split_then_focus_with_callback(
+    args: &[String],
+    on_pane_id: Option<Box<dyn FnOnce(String) + Send + 'static>>,
+) {
     let path = resolve_wtcli_path();
     let owned_args: Vec<String> = std::iter::once("--json".to_string())
         .chain(args.iter().cloned())
@@ -217,6 +236,10 @@ pub fn spawn_wtcli_split_then_focus(args: &[String]) {
             %session_id,
             "split-pane returned new pane GUID, issuing focus-pane",
         );
+
+        if let Some(cb) = on_pane_id {
+            cb(session_id.clone());
+        }
 
         let focus_args = vec![
             "focus-pane".to_string(),

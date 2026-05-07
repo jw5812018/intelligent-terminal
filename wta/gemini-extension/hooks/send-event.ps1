@@ -1,5 +1,15 @@
 # send-event.ps1 — Forward Copilot CLI hook events to WTA via wtcli
-param([string]$EventType = "agent.hook")
+#
+# CLI-source identification:
+#   The installer hard-codes which CLI invokes this script via the
+#   `-CliSource` parameter (claude / copilot / gemini). That is the
+#   ONLY reliable signal — env-var heuristics are unreliable because
+#   Copilot CLI inherits Claude's plugin shape and sets CLAUDE_PLUGIN_ROOT,
+#   making it indistinguishable from a real Claude run by env vars alone.
+param(
+    [string]$EventType = "agent.hook",
+    [string]$CliSource = ""
+)
 
 # Skip if not running inside Windows Terminal
 if (-not $env:WT_COM_CLSID) { exit 0 }
@@ -49,21 +59,27 @@ try {
         $agentSessionId = $env:GEMINI_SESSION_ID
     }
 
-    # Detect CLI source: prefer WTA_CLI_SOURCE (set by bash hooks); else use the
-    # CLI-specific session-id env var (most reliable: only that CLI sets it);
-    # only fall back to CLAUDE_PLUGIN_ROOT if no session-id was found, since
-    # Copilot CLI also sets CLAUDE_PLUGIN_ROOT (its plugin format borrows from
-    # Claude), which would otherwise mis-tag Copilot sessions as Claude.
-    $cliSource = $env:WTA_CLI_SOURCE
-    if (-not $cliSource) {
-        if     ($env:COPILOT_SESSION_ID) { $cliSource = "copilot" }
-        elseif ($env:GEMINI_SESSION_ID)  { $cliSource = "gemini" }
-        elseif ($env:CLAUDE_SESSION_ID)  { $cliSource = "claude" }
-        elseif ($env:GEMINI_CLI)         { $cliSource = "gemini" }
-        elseif ($env:COPILOT_CLI)        { $cliSource = "copilot" }
-        elseif ($env:CLAUDE_PLUGIN_ROOT) { $cliSource = "claude" }
-        else { $cliSource = "copilot" }
+    # Detect CLI source — priority order:
+    #   1. The `-CliSource` script parameter (set by the installer per-CLI;
+    #      most reliable: hard-coded at install time, not affected by
+    #      env-var leakage between CLIs that share Claude's plugin shape).
+    #   2. WTA_CLI_SOURCE env var (manual override / bash hooks).
+    #   3. CLI-specific session-id env vars (only that CLI sets each one).
+    #   4. CLI-specific marker env vars.
+    #   5. CLAUDE_PLUGIN_ROOT — last resort BEFORE the default.
+    #   6. Default "copilot" — LEGACY fallback; should never be hit when
+    #      installer plumbing is correct.
+    if (-not $CliSource) { $CliSource = $env:WTA_CLI_SOURCE }
+    if (-not $CliSource) {
+        if     ($env:COPILOT_SESSION_ID) { $CliSource = "copilot" }
+        elseif ($env:GEMINI_SESSION_ID)  { $CliSource = "gemini" }
+        elseif ($env:CLAUDE_SESSION_ID)  { $CliSource = "claude" }
+        elseif ($env:GEMINI_CLI)         { $CliSource = "gemini" }
+        elseif ($env:COPILOT_CLI)        { $CliSource = "copilot" }
+        elseif ($env:CLAUDE_PLUGIN_ROOT) { $CliSource = "claude" }
+        else { $CliSource = "copilot" }
     }
+    $cliSource = $CliSource
 
     $wrapper = @{
         cli_source       = $cliSource

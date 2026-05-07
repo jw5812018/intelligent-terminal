@@ -147,6 +147,14 @@ impl WtNotification {
 
 /// Route a parsed `agent_event` payload into the AgentSessionRegistry.
 ///
+/// `pane_session_id` is the **WT pane GUID** ($env:WT_SESSION in the
+/// originating pane), carried in the COM broadcast as
+/// `params.session_id`. It is NOT the CLI agent's own session id.
+/// The agent's session id arrives as `params.agent_session_id` (the
+/// `asid` local) and is what we use as the registry key when known —
+/// see the module-level docs in `agent_sessions.rs` for the
+/// distinction.
+///
 /// Returns `true` if the registry was updated and the UI should redraw.
 pub fn route_agent_event_to_registry(
     reg: &mut crate::agent_sessions::AgentSessionRegistry,
@@ -496,6 +504,15 @@ pub enum AppEvent {
     InstallProgress(String),
     /// Onboarding install: install task finished. Ok = success, Err = error message.
     InstallComplete(Result<(), String>),
+    /// `wtcli split-pane` for a resume action returned the new pane's GUID.
+    /// Bind it to the session row so a future `connection_state: closed`
+    /// for that pane demotes the row out of Idle/Working — necessary for
+    /// CLIs without a hook bridge (Gemini), where no SessionStarted event
+    /// would otherwise populate `pane_session_id` / `active_by_pane`.
+    ResumePaneCreated {
+        key: crate::agent_sessions::AgentKey,
+        pane_session_id: String,
+    },
 }
 
 // --- Per-tab session storage ---
@@ -612,6 +629,11 @@ pub struct App {
     tab_sessions: HashMap<String, TabSession>,
     // Onboarding: signals main.rs to spawn `winget install GitHub.Copilot`.
     install_request_tx: Option<mpsc::UnboundedSender<()>>,
+    // Self-targeting AppEvent sender. Used by background tasks (e.g. the
+    // split-pane callback in `dispatch_resume`) to deliver an AppEvent
+    // back into the App's main event loop. Set by main.rs right after
+    // `App::new` via `set_app_event_tx`.
+    app_event_tx: Option<mpsc::UnboundedSender<AppEvent>>,
 }
 
 impl App {
@@ -681,6 +703,14 @@ impl App {
                 if std::env::var("WTA_NO_HISTORY").ok().as_deref() != Some("1") {
                     reg.merge_historical(crate::history_loader::load_all());
                 }
+                // Best-effort: drop our hook bridge on disk and merge it into
+                // Claude's settings.json so historical / live Claude sessions
+                // start emitting agent events without a separate manual
+                // `claude plugin install` step. Idempotent across runs.
+                #[cfg(not(test))]
+                if std::env::var("WTA_NO_CLAUDE_HOOKS").ok().as_deref() != Some("1") {
+                    crate::claude_hooks_installer::ensure_installed();
+                }
                 reg
             },
             current_view: View::Chat,
@@ -703,12 +733,20 @@ impl App {
             inflight_autofix_generation: None,
             tab_sessions: HashMap::new(),
             install_request_tx: None,
+            app_event_tx: None,
         }
     }
 
     /// Wire up the channel that signals main.rs to spawn `winget install`.
     pub fn set_install_request_tx(&mut self, tx: mpsc::UnboundedSender<()>) {
         self.install_request_tx = Some(tx);
+    }
+
+    /// Wire up the App's own event channel so background tasks (currently
+    /// the split-pane callback in `dispatch_resume`) can deliver an
+    /// `AppEvent` back into the main event loop.
+    pub fn set_app_event_tx(&mut self, tx: mpsc::UnboundedSender<AppEvent>) {
+        self.app_event_tx = Some(tx);
     }
 
     pub async fn run(
@@ -905,9 +943,9 @@ impl App {
             AppEvent::InstallStarted => "install_started",
             AppEvent::InstallProgress(_) => "install_progress",
             AppEvent::InstallComplete(_) => "install_complete",
+            AppEvent::ResumePaneCreated { .. } => "resume_pane_created",
         }
     }
-
     fn trace_state(&self) -> String {
         format!(
             "state={:?} messages={} completed_turns={} input_chars={} thought_chars={} pending_chars={} scroll={} streaming={} activity_frame={} recommendations={} permission={} timing_note={}",
@@ -1264,6 +1302,15 @@ impl App {
                 // hooks in the agent's own pane, so session_id would match ours.
                 if method == "agent_event" {
                     // Track CLI-agent sessions in OTHER panes (not WTA's own pane).
+                    // `session_id` here is the *pane* GUID ($env:WT_SESSION in
+                    // the originating pane) — NOT the CLI agent's session id.
+                    // We compare it against our own pane GUID (also WT_SESSION,
+                    // captured at startup via the VT channel) to filter out
+                    // events that the agent's hooks fired against our own pane.
+                    // The agent's session id lives inside `params.agent_session_id`
+                    // and is what `route_agent_event_to_registry` uses as the
+                    // registry key — see the doc comment on that function.
+                    //
                     // The chat-display below logs ALL agent events, including ours.
                     if self.pane_session_id.as_deref() != Some(session_id.as_str()) {
                         let _ = route_agent_event_to_registry(
@@ -1450,6 +1497,19 @@ impl App {
                     });
                     self.state = ConnectionState::Disconnected;
                 }
+            }
+            AppEvent::ResumePaneCreated { key, pane_session_id } => {
+                // The split-pane callback fired with the new pane's GUID.
+                // Bind it to the session row so PaneClosed can later demote
+                // the row out of Idle (critical for Gemini, which has no
+                // SessionStarted hook to do this binding for us).
+                self.agent_sessions.apply(
+                    crate::agent_sessions::SessionEvent::ResumePaneAssigned {
+                        key,
+                        pane_session_id,
+                    },
+                );
+                let _ = self.agent_sessions.take_dirty();
             }
         }
     }
@@ -3043,13 +3103,27 @@ impl App {
             Idle | Working | Attention | Error => {
                 if let Some(pane) = &s.pane_session_id {
                     self.dispatch_focus_pane(pane.clone());
+                    // Stay in Agents view: the F2 list itself moves no
+                    // keyboard focus (wtcli focus-pane already moved focus
+                    // to the target pane). Keeping the view open means the
+                    // next time the user comes back to the wta pane (e.g.
+                    // via F2 again, or alt-tab) the list is still there.
                 } else {
+                    // "Live" row with no pane GUID is a stale-state row
+                    // typically left behind by an earlier ResumeDispatched
+                    // for an agent whose hooks never bound a pane GUID
+                    // (e.g. Copilot CLI without a hooks plugin installed).
+                    // Per user contract: Enter on a live row must focus an
+                    // existing pane, never split a new one. We cannot focus
+                    // a pane we don't know about, so this is a no-op with
+                    // a warning trace for diagnostics.
                     tracing::warn!(
                         target: "agents_view",
                         key = %s.key,
                         status = ?s.status,
-                        "activate_session: live row has no pane_session_id; \
-                         silently no-op (waiting for SessionStarted hook)",
+                        cli = ?s.cli_source,
+                        "live row has no pane_session_id; Enter is a no-op \
+                         (waiting for SessionStarted hook to bind a pane GUID)",
                     );
                 }
             }
@@ -3140,7 +3214,29 @@ impl App {
         // hardcodes background=true at the COM layer (src/tools/wtcli/main.cpp:446),
         // so the new pane lands behind the originating one. Resuming a
         // historical session from F2 should put the user *in* the new pane.
-        crate::shell::wt_channel::spawn_wtcli_split_then_focus(&argv);
+        //
+        // Pass a callback so when the split returns the new pane's GUID we
+        // can bind it to the session row. Without this binding, Gemini-resumed
+        // panes never demote out of Idle when closed (Gemini has no
+        // SessionStarted hook to populate active_by_pane). Claude/Copilot
+        // hooks fire too — for them ResumePaneAssigned is idempotent w.r.t.
+        // SessionStarted.
+        let on_pane_id: Option<Box<dyn FnOnce(String) + Send + 'static>> =
+            match self.app_event_tx.clone() {
+                Some(tx) => {
+                    let resumed_key = s.key.clone();
+                    Some(Box::new(move |pane_session_id: String| {
+                        let _ = tx.send(AppEvent::ResumePaneCreated {
+                            key: resumed_key,
+                            pane_session_id,
+                        });
+                    }))
+                }
+                None => None,
+            };
+        crate::shell::wt_channel::spawn_wtcli_split_then_focus_with_callback(
+            &argv, on_pane_id,
+        );
 
         // Optimistically transition the row out of Historical/Ended so a
         // rapid second Enter on the same row does NOT spawn another pane
@@ -3408,12 +3504,64 @@ mod tests {
             .expect("a command was dispatched");
         assert_eq!(cmd.kind, DispatchedCommandKind::FocusPane);
         assert_eq!(cmd.session_id.as_deref(), Some("00000000-0000-0000-0000-0000000000aa"));
+        // After focusing a live pane, we keep the agents list open so the
+        // user can come back to it (e.g. press F2 again to switch to a
+        // different agent) without re-loading.
+        assert_eq!(app.current_view, View::Agents,
+            "Enter on live row must NOT close the F2 view");
+    }
+
+    #[test]
+    fn enter_on_live_row_without_pane_is_noop_not_split() {
+        // Contract (per user): Enter on a live row must NEVER spawn a new
+        // pane; it should focus the existing one. When pane_session_id is
+        // None (typically because an earlier ResumeDispatched flipped
+        // status from Historical → Idle for an agent whose hooks never
+        // arrived to bind the pane GUID — Copilot CLI without a hooks
+        // plugin is the canonical case), we cannot focus a pane we don't
+        // know about. The previous behaviour of falling back to
+        // dispatch_resume caused F2-Enter to silently split *another* new
+        // pane on every press, which is exactly what the user does NOT
+        // want. So: no-op, warn-log only.
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use crate::agent_sessions::{AgentSession, AgentStatus, CliSource};
+        use std::path::PathBuf;
+        let mut app = test_app();
+        app.agent_sessions.merge_historical(vec![AgentSession {
+            key:               "copilot-resumed".into(),
+            cli_source:        CliSource::Copilot,
+            pane_session_id:   None,
+            window_id:         None,
+            tab_id:            None,
+            title:             "Resumed Copilot row".into(),
+            cwd:               PathBuf::from("/work/proj"),
+            started_at:        std::time::SystemTime::UNIX_EPOCH,
+            last_activity_at:  std::time::SystemTime::UNIX_EPOCH,
+            status:            AgentStatus::Idle,
+            last_error:        None,
+            current_tool:      None,
+            attention_reason:  None,
+            log_path:          None,
+        }]);
+        app.current_view = View::Agents;
+        app.agents_list_state.select(Some(0));
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(
+            app.last_dispatched_command_for_test().is_none(),
+            "Enter on live-row-without-pane must NOT dispatch any command \
+             (no focus target, and resume would wrongly split a new pane). \
+             Got: {:?}",
+            app.last_dispatched_command_for_test(),
+        );
+        // View stays in Agents.
+        assert_eq!(app.current_view, View::Agents);
     }
 
     #[test]
     fn enter_on_history_row_dispatches_split_pane_with_resume() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        use crate::agent_sessions::{CliSource, SessionEvent};
+        use crate::agent_sessions::{CliSource, SessionEvent, AgentStatus};
         use std::path::PathBuf;
         let mut app = test_app();
         app.agent_sessions.apply(SessionEvent::SessionStarted {
@@ -3438,6 +3586,7 @@ mod tests {
         // shim extension on dev machines that have npm-installed Claude.
         assert!(
             argv.contains("claude --resume abc-123")
+                || argv.contains("claude.exe --resume abc-123")
                 || argv.contains("claude.cmd --resume abc-123"),
             "argv: {}", argv,
         );
@@ -3455,6 +3604,55 @@ mod tests {
             "expected cwd to be passed to cd, argv: {}",
             argv,
         );
+
+        // After dispatching resume, the registry row must transition out
+        // of Ended/Historical into Idle so the F2 list immediately shows
+        // a non-dim "IDLE" label rather than a stale dim row.
+        let s = app.agent_sessions.iter_sorted()
+            .into_iter().find(|s| s.key == "abc-123")
+            .expect("session still in registry");
+        assert_eq!(s.status, AgentStatus::Idle,
+            "ResumeDispatched must flip Ended/Historical → Idle");
+    }
+
+    #[test]
+    fn enter_on_historical_row_transitions_to_idle() {
+        // Pure regression test for the "resumed claude row stays
+        // HISTORICAL" symptom: a row loaded by merge_historical (status =
+        // Historical, no pane_session_id) must become Idle after the user
+        // presses Enter, even before the new pane's hooks fire.
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use crate::agent_sessions::{AgentSession, AgentStatus, CliSource};
+        use std::path::PathBuf;
+        use std::time::SystemTime;
+
+        let mut app = test_app();
+        app.agent_sessions.merge_historical(vec![AgentSession {
+            key:               "claude-uuid-1".into(),
+            cli_source:        CliSource::Claude,
+            pane_session_id:   None,
+            window_id:         None,
+            tab_id:            None,
+            title:             "an old debug session".into(),
+            cwd:               PathBuf::from("C:\\work\\proj"),
+            started_at:        SystemTime::now(),
+            last_activity_at:  SystemTime::now(),
+            status:            AgentStatus::Historical,
+            last_error:        None,
+            current_tool:      None,
+            attention_reason:  None,
+            log_path:          None,
+        }]);
+        app.current_view = View::Agents;
+        app.agents_list_state.select(Some(0));
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let s = app.agent_sessions.iter_sorted()
+            .into_iter().find(|s| s.key == "claude-uuid-1")
+            .expect("historical session still in registry");
+        assert_eq!(s.status, AgentStatus::Idle,
+            "after Enter on a Historical row the status must be Idle (not Historical)");
     }
 
     #[test]

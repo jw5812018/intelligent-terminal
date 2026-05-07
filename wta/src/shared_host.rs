@@ -283,7 +283,8 @@ impl SharedUiEvent {
             | AppEvent::PreflightComplete(_)
             | AppEvent::InstallStarted
             | AppEvent::InstallProgress(_)
-            | AppEvent::InstallComplete(_) => None,
+            | AppEvent::InstallComplete(_)
+            | AppEvent::ResumePaneCreated { .. } => None,
             AppEvent::UserMessage(_) | AppEvent::MouseScroll { .. } => None,
         }
     }
@@ -1973,6 +1974,7 @@ impl HostSessionState {
             | AppEvent::InstallStarted
             | AppEvent::InstallProgress(_)
             | AppEvent::InstallComplete(_)
+            | AppEvent::ResumePaneCreated { .. }
             | AppEvent::Tick
             | AppEvent::Key(_)
             | AppEvent::MouseScroll { .. }

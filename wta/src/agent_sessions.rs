@@ -3,6 +3,27 @@
 // Runtime registry for tracking live and historical CLI agent sessions.
 // Independent from `agent_registry.rs`, which is the static catalog of
 // CLI profiles.
+//
+// Two GUIDs flow through this module — they are DIFFERENT things and must
+// not be confused:
+//
+//   * `pane_session_id` (== $env:WT_SESSION in the agent's pane):
+//       The Windows Terminal pane/connection GUID. Set by
+//       ConptyConnection.cpp on every spawned shell. Used as the routing
+//       key for `wtcli focus-pane -t <guid>` and for filtering "is this
+//       event from our own pane?". Plain GUID, no braces.
+//
+//   * `key` (the AgentKey, derived from the CLI agent's own session id):
+//       Claude's UUID under ~/.claude/projects/.../<uuid>.jsonl, Gemini's
+//       `sessionId` field, Copilot's session-state folder name. This is
+//       what `claude --resume <id>` consumes. Stable across pane
+//       lifetimes — a resumed session keeps the same key but gets a
+//       brand-new pane_session_id.
+//
+// `resolve_or_synthesize_key` synthesises a `pane:<guid>` key from
+// pane_session_id only when the agent's own session id is unknown
+// (e.g. Copilot CLI doesn't fire any hooks). Such a row cannot be
+// resumed — it's only valid while the pane is live.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -74,6 +95,20 @@ pub enum SessionEvent {
     /// pane_session_id stays None until the hook lands; activate_session's
     /// focus-pane branch is a no-op while pane_session_id is None.
     ResumeDispatched { key: AgentKey },
+    /// Bind a freshly-spawned resume pane's GUID to its session row, BEFORE
+    /// any SessionStarted hook fires. Sourced from the JSON output of
+    /// `wtcli --json split-pane`. Necessary for CLIs without hooks (Gemini
+    /// today, plus any future CLI we don't yet have a bridge for) so that
+    /// when the user later closes the pane, our `connection_state: closed`
+    /// → `PaneClosed` path can transition the row to Ended (empty status)
+    /// instead of leaving it stuck at Idle indefinitely.
+    ///
+    /// Idempotent w.r.t. SessionStarted: if Claude/Copilot's hook fires
+    /// after this event, SessionStarted re-binds the same pane GUID and
+    /// produces the same end state. If the hook fires *before* this
+    /// (Claude/Copilot's typical fast path), the row already has the
+    /// pane GUID and this event is a no-op for the same key+pane.
+    ResumePaneAssigned { key: AgentKey, pane_session_id: String },
 }
 
 /// Returns `true` for tool names that represent the agent soliciting input
@@ -266,6 +301,41 @@ impl AgentSessionRegistry {
                         entry.last_activity_at  = now;
                         self.dirty = true;
                     }
+                }
+            }
+
+            SessionEvent::ResumePaneAssigned { key, pane_session_id } => {
+                if let Some(entry) = self.sessions.get_mut(&key) {
+                    // No-op fast path: pane already correctly bound (e.g. a
+                    // SessionStarted hook beat the split-pane callback).
+                    if entry.pane_session_id.as_deref() == Some(pane_session_id.as_str()) {
+                        return;
+                    }
+                    // Drop a stale binding (rare: previous pane never closed
+                    // cleanly). Always rebind to the new pane.
+                    if let Some(old_pane) = entry.pane_session_id.take() {
+                        if old_pane != pane_session_id {
+                            self.active_by_pane.remove(&old_pane);
+                            tracing::info!(
+                                target: "agent_session_registry",
+                                key = %key,
+                                old_pane = %old_pane,
+                                new_pane = %pane_session_id,
+                                "ResumePaneAssigned rebinding pane_session_id",
+                            );
+                        }
+                    } else {
+                        tracing::info!(
+                            target: "agent_session_registry",
+                            key = %key,
+                            new_pane = %pane_session_id,
+                            "ResumePaneAssigned binding pane_session_id (no hook bridge)",
+                        );
+                    }
+                    entry.pane_session_id  = Some(pane_session_id.clone());
+                    entry.last_activity_at = now;
+                    self.active_by_pane.insert(pane_session_id, key);
+                    self.dirty = true;
                 }
             }
         }
@@ -682,6 +752,110 @@ mod tests {
         let mut reg = AgentSessionRegistry::new();
         reg.apply(SessionEvent::ResumeDispatched { key: k("ghost") });
         assert!(reg.sessions.is_empty());
+    }
+
+    #[test]
+    fn resume_pane_assigned_binds_pane_so_pane_closed_demotes_row() {
+        // The Gemini-without-hooks scenario: user presses Enter on a
+        // Historical Gemini row, dispatch_resume fires ResumeDispatched
+        // (Historical -> Idle), and `wtcli split-pane`'s callback delivers
+        // the new pane GUID via ResumePaneAssigned. When the user later
+        // closes the resumed pane, PaneClosed must demote the row to Ended
+        // (empty status), matching Copilot/Claude behavior.
+        let mut reg = AgentSessionRegistry::new();
+        reg.merge_historical(vec![AgentSession {
+            key:               k("g"),
+            cli_source:        CliSource::Gemini,
+            pane_session_id:   None,
+            window_id:         None,
+            tab_id:            None,
+            title:             "t".into(),
+            cwd:               PathBuf::from("/x"),
+            started_at:        SystemTime::UNIX_EPOCH,
+            last_activity_at:  SystemTime::UNIX_EPOCH,
+            status:            AgentStatus::Historical,
+            last_error:        None,
+            current_tool:      None,
+            attention_reason:  None,
+            log_path:          None,
+        }]);
+        reg.apply(SessionEvent::ResumeDispatched { key: k("g") });
+        assert_eq!(reg.sessions.get(&k("g")).unwrap().status, AgentStatus::Idle,
+            "ResumeDispatched promotes Historical -> Idle");
+
+        // Split-pane callback fires: bind the new pane.
+        reg.apply(SessionEvent::ResumePaneAssigned {
+            key: k("g"),
+            pane_session_id: pane("new-pane"),
+        });
+        let s = reg.sessions.get(&k("g")).unwrap();
+        assert_eq!(s.pane_session_id.as_deref(), Some(pane("new-pane").as_str()));
+        assert_eq!(s.status, AgentStatus::Idle, "binding does not change status");
+        assert_eq!(reg.active_by_pane.get(&pane("new-pane")).map(String::as_str), Some(k("g").as_str()),
+            "pane must be in active_by_pane so PaneClosed can find it");
+
+        // Now simulate user closing the pane.
+        reg.apply(SessionEvent::PaneClosed { pane_session_id: pane("new-pane") });
+        let s = reg.sessions.get(&k("g")).unwrap();
+        assert_eq!(s.status, AgentStatus::Ended,
+            "PaneClosed must demote a bound row to Ended (empty status)");
+        assert!(s.pane_session_id.is_none());
+        assert!(reg.active_by_pane.is_empty());
+    }
+
+    #[test]
+    fn resume_pane_assigned_is_idempotent_when_pane_matches() {
+        // SessionStarted hook may beat the split-pane callback for
+        // Claude/Copilot. If pane_session_id already matches, the
+        // ResumePaneAssigned event must be a no-op (no logged "rebinding"
+        // and no spurious dirty flag).
+        let mut reg = AgentSessionRegistry::new();
+        reg.apply(SessionEvent::SessionStarted {
+            key: k("c"), cli_source: CliSource::Claude,
+            pane_session_id: pane("p1"), cwd: PathBuf::from("/x"),
+            title: "t".into(),
+        });
+        let _ = reg.take_dirty();
+
+        reg.apply(SessionEvent::ResumePaneAssigned {
+            key: k("c"),
+            pane_session_id: pane("p1"),
+        });
+        let s = reg.sessions.get(&k("c")).unwrap();
+        assert_eq!(s.pane_session_id.as_deref(), Some(pane("p1").as_str()));
+        assert!(!reg.take_dirty(), "no-op should not mark registry dirty");
+    }
+
+    #[test]
+    fn resume_pane_assigned_rebinds_when_pane_differs() {
+        // If for some reason the row has a stale pane GUID (previous resume
+        // never closed cleanly), accept the new one and clean up the map.
+        let mut reg = AgentSessionRegistry::new();
+        reg.apply(SessionEvent::SessionStarted {
+            key: k("c"), cli_source: CliSource::Gemini,
+            pane_session_id: pane("old"), cwd: PathBuf::from("/x"),
+            title: "t".into(),
+        });
+        reg.apply(SessionEvent::ResumePaneAssigned {
+            key: k("c"),
+            pane_session_id: pane("new"),
+        });
+        let s = reg.sessions.get(&k("c")).unwrap();
+        assert_eq!(s.pane_session_id.as_deref(), Some(pane("new").as_str()));
+        assert!(reg.active_by_pane.get(&pane("old")).is_none(),
+            "old pane mapping must be cleaned up");
+        assert_eq!(reg.active_by_pane.get(&pane("new")).map(String::as_str), Some(k("c").as_str()));
+    }
+
+    #[test]
+    fn resume_pane_assigned_for_unknown_key_is_noop() {
+        let mut reg = AgentSessionRegistry::new();
+        reg.apply(SessionEvent::ResumePaneAssigned {
+            key: k("ghost"),
+            pane_session_id: pane("p"),
+        });
+        assert!(reg.sessions.is_empty());
+        assert!(reg.active_by_pane.is_empty());
     }
 
     #[test]

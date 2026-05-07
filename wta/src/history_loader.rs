@@ -22,8 +22,14 @@
 //   Gemini:   ~/.gemini/tmp/<project-slug>/chats/session-*.jsonl
 //             - session id   = first JSONL line `sessionId` field
 //             - cwd          = ~/.gemini/projects.json reverse lookup
-//             - title        = first `{type:"user"}` line content[0].text
+//             - title        = first JSONL line whose `type:"user"` carries
+//                              a content[0].text (best-effort)
 //             - last_activity= file mtime
+//
+// (Note: per-subagent JSONL files may live in nested `<UUID>/` subdirs of
+// `chats/`. Top-level Gemini sessions are flat files named `session-*.jsonl`.
+// under `<UUID>/<name>.json`. We only pick up `session-*.json` at the
+// top level.)
 //
 // Sort each list by last_activity desc; cap each CLI at MAX_PER_CLI.
 
@@ -92,11 +98,7 @@ fn gemini_title_for_key(home: &Path, key: &str) -> Option<String> {
         let Ok(files) = fs::read_dir(&chats) else { continue; };
         for f in files.flatten() {
             let p = f.path();
-            let name = match p.file_name().and_then(|n| n.to_str()) {
-                Some(s) => s.to_string(),
-                None => continue,
-            };
-            if !name.starts_with("session-") || !name.ends_with(".jsonl") { continue; }
+            if !is_gemini_session_file(&p) { continue; }
             let (sid, _) = parse_gemini_meta(&p);
             if sid.as_deref() == Some(key) {
                 return first_user_text_jsonl(&p, ClaudeOrGemini::Gemini);
@@ -261,17 +263,23 @@ fn load_gemini(home: &Path) -> Vec<AgentSession> {
 
         for f in files.flatten() {
             let path = f.path();
-            if !path.is_file() { continue; }
-            let name = match path.file_name().and_then(|n| n.to_str()) {
-                Some(s) => s.to_string(),
-                None => continue,
-            };
-            if !name.starts_with("session-") || !name.ends_with(".jsonl") { continue; }
+            if !is_gemini_session_file(&path) { continue; }
 
-            let last_activity = path.metadata().and_then(|m| m.modified()).ok()
+            let (sid, last_updated) = parse_gemini_meta(&path);
+            let last_activity = last_updated
+                .or_else(|| path.metadata().and_then(|m| m.modified()).ok())
                 .unwrap_or(SystemTime::UNIX_EPOCH);
-            let (sid, _start) = parse_gemini_meta(&path);
-            let key = sid.unwrap_or_else(|| format!("gemini:{}", name));
+            let key = match sid {
+                Some(s) => s,
+                None => {
+                    // No sessionId means we can't safely resume (`gemini --resume`
+                    // wants a session UUID). Fall back to a synthetic key based
+                    // on filename so the row still appears in F2 — resume will
+                    // silently no-op, but the user can at least see the entry.
+                    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown");
+                    format!("gemini:{}", name)
+                }
+            };
             let title = first_user_text_jsonl(&path, ClaudeOrGemini::Gemini)
                 .unwrap_or_else(|| short_id(&key, "gemini"));
 
@@ -295,6 +303,16 @@ fn load_gemini(home: &Path) -> Vec<AgentSession> {
     }
     out.sort_by(|a, b| b.last_activity_at.cmp(&a.last_activity_at));
     out
+}
+
+/// Top-level Gemini chat files are `~/.gemini/tmp/<slug>/chats/session-*.jsonl`.
+/// Files inside a per-subagent `<UUID>/` subdirectory are NOT session files
+/// and must be skipped.
+fn is_gemini_session_file(p: &Path) -> bool {
+    if !p.is_file() { return false; }
+    let Some(name) = p.file_name().and_then(|n| n.to_str()) else { return false; };
+    if !name.starts_with("session-") { return false; }
+    name.ends_with(".jsonl")
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────
@@ -370,12 +388,16 @@ pub(crate) fn parse_gemini_projects(path: &Path) -> HashMap<String, PathBuf> {
     out
 }
 
-/// Read first JSONL line; if it has `sessionId` (no `type`) treat as meta.
+/// Read the first non-empty JSONL line of a Gemini session file and extract
+/// `sessionId`. Timestamps are not exposed by Gemini's JSONL header — the
+/// caller falls back to file mtime for `last_activity`.
 pub(crate) fn parse_gemini_meta(path: &Path) -> (Option<String>, Option<SystemTime>) {
-    let Ok(text) = read_first_bytes(path, 8 * 1024) else { return (None, None) };
+    let Ok(text) = read_first_bytes(path, 64 * 1024) else { return (None, None) };
     for line in text.lines() {
         if line.trim().is_empty() { continue; }
         let Ok(val) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        // Hook events such as `{"type":"user", ...}` show up before the
+        // session header on rare occasion; skip those.
         if val.get("type").is_some() { return (None, None); }
         let sid = val.get("sessionId").and_then(|v| v.as_str()).map(String::from);
         return (sid, None);
@@ -534,13 +556,27 @@ mod tests {
 
     #[test]
     fn gemini_meta_first_line_yields_session_id() {
+        // Gemini layout: JSONL file whose first line is the session header.
         let root = tmp_root("gemini-meta");
         let f = root.join("session-2026-01-01-abc.jsonl");
         write_file(&f,
             "{\"sessionId\":\"abcd-1234\",\"projectHash\":\"x\",\"startTime\":\"2026-01-01T00:00:00Z\",\"kind\":\"main\"}\n\
              {\"type\":\"user\",\"content\":[{\"text\":\"hello\"}]}\n");
-        let (sid, _) = parse_gemini_meta(&f);
+        let (sid, _ts) = parse_gemini_meta(&f);
         assert_eq!(sid.as_deref(), Some("abcd-1234"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn gemini_meta_skips_non_session_first_line() {
+        // Defensive: if a hook record lands first, we should give up rather
+        // than mistake `type:"user"` for a session header.
+        let root = tmp_root("gemini-meta-skip");
+        let f = root.join("session-x.jsonl");
+        write_file(&f,
+            "{\"type\":\"user\",\"content\":[{\"text\":\"hi\"}]}\n");
+        let (sid, _) = parse_gemini_meta(&f);
+        assert!(sid.is_none());
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -665,21 +701,57 @@ mod tests {
             r#"{"projects":{"C:\\Users\\me\\proj":"meproj"}}"#);
         let chats = home.join(".gemini").join("tmp").join("meproj").join("chats");
         fs::create_dir_all(&chats).unwrap();
+        // Gemini JSONL: first line is the session header, subsequent lines
+        // are individual messages.
         write_file(&chats.join("session-2026-05-03T10-47-abcd.jsonl"),
-            "{\"sessionId\":\"abcd-1234\",\"projectHash\":\"x\",\"startTime\":\"2026-05-03T10:47:50.468Z\",\"kind\":\"main\"}\n\
+            "{\"sessionId\":\"abcd-1234\",\"projectHash\":\"x\",\"startTime\":\"2026-05-03T10:47:50Z\",\"kind\":\"main\"}\n\
+             {\"type\":\"info\",\"content\":\"version up\"}\n\
              {\"type\":\"user\",\"content\":[{\"text\":\"explain build system\"}]}\n");
-        // subagent-shape file must NOT be picked up
+        // Per-subagent files in nested subdirectories must NOT be picked up.
         let subdir = chats.join("aaaa-bbbb");
         fs::create_dir_all(&subdir).unwrap();
         write_file(&subdir.join("inner.jsonl"), "{}\n");
 
         let v = load_gemini(&home);
-        assert_eq!(v.len(), 1);
+        assert_eq!(v.len(), 1, "expected exactly one Gemini session, got {:?}",
+            v.iter().map(|s| (s.key.clone(), s.title.clone())).collect::<Vec<_>>());
         let s = &v[0];
         assert_eq!(s.key, "abcd-1234");
         assert_eq!(s.cli_source, CliSource::Gemini);
         assert_eq!(s.cwd, PathBuf::from("C:\\Users\\me\\proj"));
         assert_eq!(s.title, "explain build system");
+        assert_eq!(s.status, AgentStatus::Historical);
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn gemini_loader_rejects_legacy_dot_json_files() {
+        // Single-object `.json` was a transient layout. Latest Gemini went
+        // back to `.jsonl`, so loader must NOT pick up `.json` files (they
+        // would parse as one massive JSON line and confuse `parse_gemini_meta`).
+        let home = tmp_root("gemini-home-rejects-json");
+        write_file(&home.join(".gemini").join("projects.json"),
+            r#"{"projects":{"C:\\proj":"p"}}"#);
+        let chats = home.join(".gemini").join("tmp").join("p").join("chats");
+        fs::create_dir_all(&chats).unwrap();
+        write_file(&chats.join("session-2026-05-03T10-47-abcd.json"),
+            "{\"sessionId\":\"json-id\",\"messages\":[]}");
+        let v = load_gemini(&home);
+        assert!(v.is_empty(), "`.json` files must be ignored: got {:?}",
+            v.iter().map(|s| s.key.clone()).collect::<Vec<_>>());
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn gemini_loader_skips_files_not_starting_with_session_prefix() {
+        let home = tmp_root("gemini-home-skip");
+        let chats = home.join(".gemini").join("tmp").join("p").join("chats");
+        fs::create_dir_all(&chats).unwrap();
+        write_file(&chats.join("notes.jsonl"),
+            "{\"sessionId\":\"x\"}\n");
+
+        let v = load_gemini(&home);
+        assert!(v.is_empty(), "non-session-prefixed files must be ignored");
         let _ = fs::remove_dir_all(&home);
     }
 
