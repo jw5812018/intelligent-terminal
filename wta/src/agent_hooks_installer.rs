@@ -131,10 +131,15 @@ const GEMINI_EXTENSION_DIR_NAME: &str = "wt-agent-hooks";
 /// Schema version of the JSON returned by [`status`]. Bumped when the shape
 /// or the set of possible string-enum values changes.
 ///
-/// v2 (this version): `bundle_source.kind` no longer includes `"embedded"`
-/// (the embedded `include_str!` fallback was removed in #20). Possible kinds
-/// are now `env` / `exe-sibling` / `dev-tree` / `none`.
-const STATUS_SCHEMA_VERSION: u32 = 2;
+/// v3 (this version): added `marketplace_path` and `marketplace_path_valid`
+/// per-CLI fields (#25). `marketplace_registered: true` no longer implies the
+/// registered `source.path` actually exists on disk; consumers should consult
+/// `marketplace_path_valid` for that.
+///
+/// v2: `bundle_source.kind` no longer includes `"embedded"` (the embedded
+/// `include_str!` fallback was removed in #20). Possible kinds are
+/// `env` / `exe-sibling` / `dev-tree` / `none`.
+const STATUS_SCHEMA_VERSION: u32 = 3;
 
 /// Schema version of the JSON returned by [`uninstall`].
 ///
@@ -220,6 +225,22 @@ impl CliScope {
 /// registered with that CLI. `detection_fallback` is set to `Some("fs")`
 /// when the CLI command failed to spawn or returned unparseable output
 /// and we used filesystem heuristics instead.
+///
+/// `marketplace_registered` only attests that the CLI knows about the
+/// `wt-local` marketplace by name; it says nothing about whether the
+/// registered source path still exists on disk. `marketplace_path` and
+/// `marketplace_path_valid` (added in schema v3 / #25) cover that:
+///
+///   * `marketplace_path` — the `source.path` recorded with the CLI for
+///     `directory`-shaped sources. `None` when no entry was found, when the
+///     source is `github`-shaped (no local path is meaningful), or when the
+///     CLI's source-of-truth file couldn't be read.
+///   * `marketplace_path_valid` — `true` when the marketplace entry exists
+///     AND its registered location is usable: `directory` sources require
+///     `path` to point at an existing directory; `github` sources are always
+///     valid (validity isn't local-filesystem-shaped). `false` when no entry
+///     was found or the directory has been pruned out from under us
+///     (the #21 staleness symptom this field exists to catch).
 #[derive(Debug, Clone, Serialize)]
 pub struct CliStatus {
     pub name: &'static str,
@@ -227,6 +248,9 @@ pub struct CliStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub binary_path: Option<String>,
     pub marketplace_registered: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub marketplace_path: Option<String>,
+    pub marketplace_path_valid: bool,
     pub plugin_installed: bool,
     pub plugin_enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -713,6 +737,8 @@ fn copilot_status(on_path: bool, bin_path: Option<String>, home: Option<&Path>) 
         binary_on_path: on_path,
         binary_path: bin_path,
         marketplace_registered: false,
+        marketplace_path: None,
+        marketplace_path_valid: false,
         plugin_installed: false,
         plugin_enabled: false,
         detection_fallback: None,
@@ -721,6 +747,7 @@ fn copilot_status(on_path: bool, bin_path: Option<String>, home: Option<&Path>) 
         // CLI not present — fall back to fs check so we still report
         // install state from a prior run.
         copilot_fs_fallback(&mut out, home);
+        populate_marketplace_path(&mut out, CliKind::Copilot, home);
         return out;
     }
 
@@ -745,6 +772,7 @@ fn copilot_status(on_path: bool, bin_path: Option<String>, home: Option<&Path>) 
         copilot_fs_fallback(&mut out, home);
     }
 
+    populate_marketplace_path(&mut out, CliKind::Copilot, home);
     out
 }
 
@@ -893,12 +921,15 @@ fn claude_status(on_path: bool, bin_path: Option<String>, home: Option<&Path>) -
         binary_on_path: on_path,
         binary_path: bin_path,
         marketplace_registered: false,
+        marketplace_path: None,
+        marketplace_path_valid: false,
         plugin_installed: false,
         plugin_enabled: false,
         detection_fallback: None,
     };
     if !on_path {
         claude_fs_fallback(&mut out, home);
+        populate_marketplace_path(&mut out, CliKind::Claude, home);
         return out;
     }
 
@@ -919,6 +950,7 @@ fn claude_status(on_path: bool, bin_path: Option<String>, home: Option<&Path>) -
     } else {
         claude_fs_fallback(&mut out, home);
     }
+    populate_marketplace_path(&mut out, CliKind::Claude, home);
     out
 }
 
@@ -962,12 +994,15 @@ fn gemini_status(on_path: bool, bin_path: Option<String>, home: Option<&Path>) -
         // path/git directly. Report `true` whenever the extension is
         // installed so the Settings UI can render a uniform row.
         marketplace_registered: false,
+        marketplace_path: None,
+        marketplace_path_valid: false,
         plugin_installed: false,
         plugin_enabled: false,
         detection_fallback: None,
     };
     if !on_path {
         gemini_fs_fallback(&mut out, home);
+        populate_marketplace_path(&mut out, CliKind::Gemini, home);
         return out;
     }
 
@@ -985,12 +1020,14 @@ fn gemini_status(on_path: bool, bin_path: Option<String>, home: Option<&Path>) -
                 out.plugin_installed = p.installed;
                 out.plugin_enabled = p.enabled;
                 out.marketplace_registered = p.installed;
+                populate_marketplace_path(&mut out, CliKind::Gemini, home);
                 return out;
             }
             gemini_fs_fallback(&mut out, home);
         }
         Ok(_) | Err(_) => gemini_fs_fallback(&mut out, home),
     }
+    populate_marketplace_path(&mut out, CliKind::Gemini, home);
     out
 }
 
@@ -1002,6 +1039,151 @@ fn gemini_fs_fallback(out: &mut CliStatus, home: Option<&Path>) {
     out.plugin_installed = installed;
     out.plugin_enabled = installed;
     out.marketplace_registered = installed;
+}
+
+// ---- marketplace-path probe (#25) ------------------------------------------
+//
+// `marketplace_registered` only attests that the CLI knows about our
+// `wt-local` marketplace by name. Issue #25's symptom: when a user removes
+// the worktree the Copilot/Claude marketplace was registered against,
+// `marketplace_registered` stays `true` (because the entry in
+// `extraKnownMarketplaces` / `known_marketplaces.json` is still there)
+// while every subsequent `<cli> plugin install` silently fails with
+// "source path does not exist".
+//
+// To let downstream consumers (Settings UI, `Verify-AgentHooks.ps1`)
+// detect that drift, we surface:
+//
+//   * `marketplace_path`        — the registered `source.path`
+//   * `marketplace_path_valid`  — `true` when that path is still usable
+//
+// For `directory`-shaped sources, validity is `Path::is_dir`. For
+// `github`-shaped sources (e.g. `superpowers-marketplace`), validity is
+// not a local-filesystem property — we report `valid: true, path: None`.
+// For Gemini, which has no marketplace concept, the equivalent location
+// is the per-extension install directory under `~/.gemini/extensions/`.
+
+/// Resolved marketplace registration info for our `wt-local` marketplace
+/// on a given CLI. `path` is the registered local source path (only set
+/// for `directory`-shaped sources); `valid` is the path-validity bit
+/// described in [`CliStatus::marketplace_path_valid`].
+#[derive(Debug, Clone, Default)]
+struct MarketplaceInfo {
+    path: Option<String>,
+    valid: bool,
+}
+
+/// Populate `marketplace_path` / `marketplace_path_valid` on `out` from
+/// the CLI's on-disk source-of-truth file. Side-effect free; missing /
+/// unreadable files leave the defaults (`None` / `false`) in place.
+fn populate_marketplace_path(out: &mut CliStatus, cli: CliKind, home: Option<&Path>) {
+    let Some(home) = home else { return };
+    let info = match cli {
+        CliKind::Copilot => copilot_marketplace_info(home),
+        CliKind::Claude => claude_marketplace_info(home),
+        CliKind::Gemini => gemini_marketplace_info(home),
+    };
+    out.marketplace_path = info.path;
+    out.marketplace_path_valid = info.valid;
+}
+
+/// Read `~/.copilot/settings.json` and locate the `wt-local` entry under
+/// `extraKnownMarketplaces`. Settings.json is JSONC-tolerant in older
+/// Copilot builds, so strip `//` line comments before parsing.
+fn copilot_marketplace_info(home: &Path) -> MarketplaceInfo {
+    let settings_path = home.join(".copilot").join("settings.json");
+    let Ok(text) = fs::read_to_string(&settings_path) else {
+        return MarketplaceInfo::default();
+    };
+    let stripped = strip_jsonc_line_comments(&text);
+    let Ok(v) = serde_json::from_str::<Value>(&stripped) else {
+        return MarketplaceInfo::default();
+    };
+    let entry = v
+        .get("extraKnownMarketplaces")
+        .and_then(|x| x.as_object())
+        .and_then(|m| m.get(MARKETPLACE_NAME));
+    match entry {
+        Some(e) => classify_marketplace_source(e.get("source")),
+        None => MarketplaceInfo::default(),
+    }
+}
+
+/// Read `~/.claude/plugins/known_marketplaces.json` and locate the
+/// `wt-local` entry. The file is strict JSON in Claude Code 2.1.x, so
+/// no JSONC normalization is needed.
+fn claude_marketplace_info(home: &Path) -> MarketplaceInfo {
+    let known_path = home
+        .join(".claude")
+        .join("plugins")
+        .join("known_marketplaces.json");
+    let Ok(text) = fs::read_to_string(&known_path) else {
+        return MarketplaceInfo::default();
+    };
+    let Ok(v) = serde_json::from_str::<Value>(&text) else {
+        return MarketplaceInfo::default();
+    };
+    let entry = v.as_object().and_then(|m| m.get(MARKETPLACE_NAME));
+    match entry {
+        Some(e) => classify_marketplace_source(e.get("source")),
+        None => MarketplaceInfo::default(),
+    }
+}
+
+/// Gemini has no marketplace registry — the `~/.gemini/extensions/wt-agent-hooks/`
+/// directory is the install location, the source path, and the validity
+/// signal all rolled into one. Report it as the marketplace path so the
+/// Settings UI / verify script can render a uniform row across all three
+/// CLIs.
+fn gemini_marketplace_info(home: &Path) -> MarketplaceInfo {
+    let ext_dir = gemini_extension_dir(home);
+    if ext_dir.is_dir() {
+        MarketplaceInfo {
+            path: Some(ext_dir.display().to_string()),
+            valid: true,
+        }
+    } else {
+        MarketplaceInfo::default()
+    }
+}
+
+/// Classify a `source` JSON value (the inner object stored under each
+/// marketplace entry's `"source"` key) into a [`MarketplaceInfo`]:
+///
+///   * `{ "source": "directory", "path": "..." }` — read `path`, validity
+///     is `Path::is_dir`.
+///   * `{ "source": "github", ... }` — no local path applies; report
+///     `valid: true` so consumers don't false-positive a "broken" status.
+///   * Unknown / missing `source` kind — registered-but-unknown shape;
+///     report `valid: true` so we don't punish forward-compatible source
+///     kinds we haven't taught about yet.
+///   * `None` — no entry at all; defaults (`None` / `false`).
+fn classify_marketplace_source(source: Option<&Value>) -> MarketplaceInfo {
+    let Some(source) = source else {
+        return MarketplaceInfo::default();
+    };
+    let kind = source.get("source").and_then(|x| x.as_str()).unwrap_or("");
+    match kind {
+        "directory" => {
+            let path = source
+                .get("path")
+                .and_then(|x| x.as_str())
+                .map(String::from);
+            let valid = path
+                .as_deref()
+                .map(|p| Path::new(p).is_dir())
+                .unwrap_or(false);
+            MarketplaceInfo { path, valid }
+        }
+        "github" => MarketplaceInfo {
+            path: None,
+            valid: true,
+        },
+        _ => MarketplaceInfo {
+            path: None,
+            valid: true,
+        },
+    }
 }
 
 // ---- output parsers --------------------------------------------------------
@@ -2162,7 +2344,7 @@ Registered marketplaces:
     /// as a test failure.
     #[test]
     fn schema_versions_are_pinned() {
-        assert_eq!(STATUS_SCHEMA_VERSION, 2);
+        assert_eq!(STATUS_SCHEMA_VERSION, 3);
         assert_eq!(UNINSTALL_SCHEMA_VERSION, 2);
     }
 
@@ -2220,5 +2402,324 @@ Registered marketplaces:
             "",
             &["already registered", "already installed"],
         ));
+    }
+
+    // ---- marketplace path validity (#25) --------------------------------
+
+    /// `directory`-shaped source with an existing path → reports the path
+    /// and `valid: true`.
+    #[test]
+    fn classify_marketplace_source_directory_existing_path() {
+        let dir = unique_dir("classify-dir-ok");
+        let v = serde_json::json!({
+            "source": "directory",
+            "path": dir.display().to_string(),
+        });
+        let info = classify_marketplace_source(Some(&v));
+        assert_eq!(info.path.as_deref(), Some(dir.display().to_string().as_str()));
+        assert!(info.valid);
+    }
+
+    /// `directory`-shaped source with a now-missing path → reports the
+    /// path (so consumers can show what went stale) but `valid: false`.
+    /// This is the exact #25 symptom.
+    #[test]
+    fn classify_marketplace_source_directory_missing_path() {
+        let dir = unique_dir("classify-dir-stale");
+        let stale = dir.join("does-not-exist");
+        let v = serde_json::json!({
+            "source": "directory",
+            "path": stale.display().to_string(),
+        });
+        let info = classify_marketplace_source(Some(&v));
+        assert_eq!(
+            info.path.as_deref(),
+            Some(stale.display().to_string().as_str())
+        );
+        assert!(!info.valid, "missing dir must report invalid");
+    }
+
+    /// `directory`-shaped source with no `path` key → can't validate;
+    /// report `valid: false` with `path: None`.
+    #[test]
+    fn classify_marketplace_source_directory_without_path_field() {
+        let v = serde_json::json!({ "source": "directory" });
+        let info = classify_marketplace_source(Some(&v));
+        assert!(info.path.is_none());
+        assert!(!info.valid);
+    }
+
+    /// `github`-shaped source → no local path applies; valid by definition.
+    #[test]
+    fn classify_marketplace_source_github_is_always_valid() {
+        let v = serde_json::json!({
+            "source": "github",
+            "repo": "owner/repo",
+        });
+        let info = classify_marketplace_source(Some(&v));
+        assert!(info.path.is_none());
+        assert!(info.valid);
+    }
+
+    /// Unknown / forward-compatible `source` kind → don't false-positive
+    /// a "broken" status; report valid.
+    #[test]
+    fn classify_marketplace_source_unknown_kind_is_valid() {
+        let v = serde_json::json!({ "source": "ipfs", "cid": "..." });
+        let info = classify_marketplace_source(Some(&v));
+        assert!(info.path.is_none());
+        assert!(info.valid);
+    }
+
+    /// `None` source value → no entry; report defaults.
+    #[test]
+    fn classify_marketplace_source_none_returns_defaults() {
+        let info = classify_marketplace_source(None);
+        assert!(info.path.is_none());
+        assert!(!info.valid);
+    }
+
+    /// `copilot_marketplace_info` reads `~/.copilot/settings.json`,
+    /// strips the JSONC banner, and surfaces the registered directory
+    /// path + validity. Mirrors the real on-disk shape from a working
+    /// install (see `~/.copilot/settings.json` schema).
+    #[test]
+    fn copilot_marketplace_info_directory_path_is_validated() {
+        let home = unique_dir("copilot-mkt-ok");
+        let copilot_dir = home.join(".copilot");
+        fs::create_dir_all(&copilot_dir).unwrap();
+        let bundle = unique_dir("copilot-mkt-bundle");
+        let settings = serde_json::json!({
+            "extraKnownMarketplaces": {
+                MARKETPLACE_NAME: {
+                    "source": {
+                        "source": "directory",
+                        "path": bundle.display().to_string(),
+                    }
+                }
+            }
+        });
+        let body = format!(
+            "// User settings belong in settings.json.\n{}\n",
+            serde_json::to_string_pretty(&settings).unwrap()
+        );
+        fs::write(copilot_dir.join("settings.json"), body).unwrap();
+
+        let info = copilot_marketplace_info(&home);
+        assert_eq!(
+            info.path.as_deref(),
+            Some(bundle.display().to_string().as_str())
+        );
+        assert!(info.valid);
+    }
+
+    /// #25 reproduction: settings.json points at a now-pruned worktree —
+    /// `marketplace_path` still surfaces the stale path so consumers can
+    /// display it, `valid` is `false`.
+    #[test]
+    fn copilot_marketplace_info_reports_stale_directory() {
+        let home = unique_dir("copilot-mkt-stale");
+        let copilot_dir = home.join(".copilot");
+        fs::create_dir_all(&copilot_dir).unwrap();
+        let stale = home.join("pruned-worktree-dir");
+        let settings = serde_json::json!({
+            "extraKnownMarketplaces": {
+                MARKETPLACE_NAME: {
+                    "source": {
+                        "source": "directory",
+                        "path": stale.display().to_string(),
+                    }
+                }
+            }
+        });
+        fs::write(
+            copilot_dir.join("settings.json"),
+            serde_json::to_string_pretty(&settings).unwrap(),
+        )
+        .unwrap();
+
+        let info = copilot_marketplace_info(&home);
+        assert_eq!(
+            info.path.as_deref(),
+            Some(stale.display().to_string().as_str())
+        );
+        assert!(!info.valid);
+    }
+
+    /// No settings.json on disk → defaults (no entry).
+    #[test]
+    fn copilot_marketplace_info_missing_file_defaults() {
+        let home = unique_dir("copilot-mkt-missing");
+        let info = copilot_marketplace_info(&home);
+        assert!(info.path.is_none());
+        assert!(!info.valid);
+    }
+
+    /// settings.json present but no `wt-local` entry → defaults.
+    #[test]
+    fn copilot_marketplace_info_no_wt_local_entry() {
+        let home = unique_dir("copilot-mkt-no-entry");
+        let copilot_dir = home.join(".copilot");
+        fs::create_dir_all(&copilot_dir).unwrap();
+        let settings = serde_json::json!({
+            "extraKnownMarketplaces": {
+                "superpowers-marketplace": {
+                    "source": { "source": "github", "repo": "obra/superpowers-marketplace" }
+                }
+            }
+        });
+        fs::write(
+            copilot_dir.join("settings.json"),
+            serde_json::to_string_pretty(&settings).unwrap(),
+        )
+        .unwrap();
+
+        let info = copilot_marketplace_info(&home);
+        assert!(info.path.is_none());
+        assert!(!info.valid);
+    }
+
+    /// `claude_marketplace_info` reads `known_marketplaces.json` (which is
+    /// strict JSON, no JSONC banner) and surfaces the registered directory
+    /// path + validity.
+    #[test]
+    fn claude_marketplace_info_directory_path_is_validated() {
+        let home = unique_dir("claude-mkt-ok");
+        let plugins_dir = home.join(".claude").join("plugins");
+        fs::create_dir_all(&plugins_dir).unwrap();
+        let bundle = unique_dir("claude-mkt-bundle");
+        let known = serde_json::json!({
+            MARKETPLACE_NAME: {
+                "source": {
+                    "source": "directory",
+                    "path": bundle.display().to_string(),
+                },
+                "installLocation": bundle.display().to_string(),
+            }
+        });
+        fs::write(
+            plugins_dir.join("known_marketplaces.json"),
+            serde_json::to_string_pretty(&known).unwrap(),
+        )
+        .unwrap();
+
+        let info = claude_marketplace_info(&home);
+        assert_eq!(
+            info.path.as_deref(),
+            Some(bundle.display().to_string().as_str())
+        );
+        assert!(info.valid);
+    }
+
+    /// Claude github-shaped marketplace (e.g. `claude-plugins-official`) →
+    /// no path, always valid.
+    #[test]
+    fn claude_marketplace_info_github_source_is_valid_no_path() {
+        let home = unique_dir("claude-mkt-github");
+        let plugins_dir = home.join(".claude").join("plugins");
+        fs::create_dir_all(&plugins_dir).unwrap();
+        let known = serde_json::json!({
+            MARKETPLACE_NAME: {
+                "source": { "source": "github", "repo": "owner/repo" }
+            }
+        });
+        fs::write(
+            plugins_dir.join("known_marketplaces.json"),
+            serde_json::to_string_pretty(&known).unwrap(),
+        )
+        .unwrap();
+
+        let info = claude_marketplace_info(&home);
+        assert!(info.path.is_none());
+        assert!(info.valid);
+    }
+
+    #[test]
+    fn claude_marketplace_info_missing_file_defaults() {
+        let home = unique_dir("claude-mkt-missing");
+        let info = claude_marketplace_info(&home);
+        assert!(info.path.is_none());
+        assert!(!info.valid);
+    }
+
+    /// `gemini_marketplace_info` reports the install dir as the
+    /// "marketplace path" since Gemini has no marketplace registry.
+    #[test]
+    fn gemini_marketplace_info_uses_install_dir_when_present() {
+        let home = unique_dir("gemini-mkt-ok");
+        let ext_dir = gemini_extension_dir(&home);
+        fs::create_dir_all(&ext_dir).unwrap();
+
+        let info = gemini_marketplace_info(&home);
+        assert_eq!(
+            info.path.as_deref(),
+            Some(ext_dir.display().to_string().as_str())
+        );
+        assert!(info.valid);
+    }
+
+    #[test]
+    fn gemini_marketplace_info_missing_dir_defaults() {
+        let home = unique_dir("gemini-mkt-missing");
+        let info = gemini_marketplace_info(&home);
+        assert!(info.path.is_none());
+        assert!(!info.valid);
+    }
+
+    /// `populate_marketplace_path` is a no-op when `home` is `None`
+    /// (e.g. `USERPROFILE` unset on a service account).
+    #[test]
+    fn populate_marketplace_path_noop_without_home() {
+        let mut s = CliStatus {
+            name: "copilot",
+            binary_on_path: false,
+            binary_path: None,
+            marketplace_registered: false,
+            marketplace_path: None,
+            marketplace_path_valid: false,
+            plugin_installed: false,
+            plugin_enabled: false,
+            detection_fallback: None,
+        };
+        populate_marketplace_path(&mut s, CliKind::Copilot, None);
+        assert!(s.marketplace_path.is_none());
+        assert!(!s.marketplace_path_valid);
+    }
+
+    /// End-to-end: a freshly-built `CliStatus` carries the new fields with
+    /// safe defaults so consumers parsing schema v3 always see them.
+    #[test]
+    fn cli_status_serializes_new_fields() {
+        let s = CliStatus {
+            name: "copilot",
+            binary_on_path: true,
+            binary_path: Some("C:/x/copilot.exe".into()),
+            marketplace_registered: true,
+            marketplace_path: Some("C:/repo/wt-agent-hooks/copilot".into()),
+            marketplace_path_valid: true,
+            plugin_installed: true,
+            plugin_enabled: true,
+            detection_fallback: None,
+        };
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!(
+            v.get("marketplace_path").and_then(|x| x.as_str()),
+            Some("C:/repo/wt-agent-hooks/copilot")
+        );
+        assert_eq!(
+            v.get("marketplace_path_valid").and_then(|x| x.as_bool()),
+            Some(true)
+        );
+
+        // marketplace_path: None must serialize to absent, not null,
+        // so v2 consumers parsing v3 output don't see a surprise null.
+        let s_no_path = CliStatus {
+            marketplace_path: None,
+            ..s
+        };
+        let v2 = serde_json::to_value(&s_no_path).unwrap();
+        assert!(v2.get("marketplace_path").is_none());
+        // marketplace_path_valid is always present (it's a bool, not Option).
+        assert!(v2.get("marketplace_path_valid").is_some());
     }
 }

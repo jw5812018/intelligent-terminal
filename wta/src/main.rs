@@ -914,16 +914,21 @@ fn format_hooks_status_human(r: &agent_hooks_installer::StatusReport) {
     for c in &r.clis {
         let summary = if !c.binary_on_path {
             "✗ CLI not on PATH".to_string()
-        } else if c.plugin_installed && c.plugin_enabled {
+        } else if c.plugin_installed && c.plugin_enabled && c.marketplace_path_valid {
             "✓ installed".to_string()
+        } else if c.plugin_installed && !c.marketplace_path_valid {
+            // #25: silently-broken state — plugin reports installed but
+            // the registered marketplace path is gone.
+            "⚠ marketplace path stale".to_string()
         } else if c.plugin_installed {
             "⚠ installed but disabled".to_string()
         } else {
             "✗ not installed".to_string()
         };
         let detail = format!(
-            "marketplace={}, plugin={}, enabled={}{}",
+            "marketplace={}, path_valid={}, plugin={}, enabled={}{}",
             yn(c.marketplace_registered),
+            yn(c.marketplace_path_valid),
             yn(c.plugin_installed),
             yn(c.plugin_enabled),
             c.detection_fallback
@@ -931,6 +936,9 @@ fn format_hooks_status_human(r: &agent_hooks_installer::StatusReport) {
                 .unwrap_or_default(),
         );
         println!("  {:<10} {:<28}  ({})", c.name, summary, detail);
+        if let Some(p) = c.marketplace_path.as_deref() {
+            println!("    path: {}", p);
+        }
     }
 }
 
