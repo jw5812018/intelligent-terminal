@@ -3419,12 +3419,9 @@ impl App {
         let mut cmd = std::process::Command::new(exe);
         cmd.arg("delegate").arg(prompt);
 
-        // Pass pipe credentials from environment (set when agent pane was created).
-        if let Ok(pipe_name) = std::env::var("WT_PIPE_NAME") {
-            cmd.arg("--pipe-name").arg(&pipe_name);
-        }
-        if let Ok(token) = std::env::var("WT_MCP_TOKEN") {
-            cmd.arg("--pipe-token").arg(&token);
+        // Pass COM routing identity explicitly for the delegated helper.
+        if let Ok(clsid) = std::env::var("WT_COM_CLSID") {
+            cmd.arg("--pipe-name").arg(&clsid);
         }
 
         // Fire-and-forget: spawn hidden, don't wait.

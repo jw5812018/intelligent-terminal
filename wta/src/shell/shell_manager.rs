@@ -5,7 +5,6 @@ use tokio::io::AsyncReadExt;
 use tokio::process::Child;
 use tokio::process::Command;
 
-use super::wt_channel::ConnectionInfo;
 use super::wt_channel::WtChannel;
 
 /// Configuration for creating a new terminal.
@@ -29,7 +28,7 @@ struct LocalTerminal {
     exited: Arc<Mutex<Option<u32>>>,
 }
 
-/// A terminal backed by a Windows Terminal pane (via pipe protocol).
+/// A terminal backed by a Windows Terminal pane.
 struct WtPaneTerminal {
     pane_id: String,
 }
@@ -49,7 +48,6 @@ pub struct ShellManager {
     terminals: Mutex<HashMap<String, Terminal>>,
     next_id: Mutex<u64>,
     wt_channel: Option<Arc<dyn WtChannel>>,
-    wt_connection_info: Option<ConnectionInfo>,
 }
 
 impl ShellManager {
@@ -58,17 +56,11 @@ impl ShellManager {
             terminals: Mutex::new(HashMap::new()),
             next_id: Mutex::new(1),
             wt_channel: None,
-            wt_connection_info: None,
         }
     }
 
     pub fn with_wt_channel(mut self, channel: Arc<dyn WtChannel>) -> Self {
         self.wt_channel = Some(channel);
-        self
-    }
-
-    pub fn with_wt_connection_info(mut self, info: ConnectionInfo) -> Self {
-        self.wt_connection_info = Some(info);
         self
     }
 
@@ -90,11 +82,10 @@ impl ShellManager {
 
     /// Create a terminal. Routes to WT pane if available, else local subprocess.
     /// Falls back to local if WT fails.
-    pub async fn create_terminal(&self, mut config: TerminalConfig) -> anyhow::Result<String> {
+    pub async fn create_terminal(&self, config: TerminalConfig) -> anyhow::Result<String> {
         // Nested `wta` CLI commands are control helpers, not interactive jobs.
         // Run them locally so they don't create background WT tabs.
         if self.should_force_local(&config) {
-            self.inject_wt_env(&mut config);
             return self.create_terminal_local(config).await;
         }
 
@@ -119,33 +110,7 @@ impl ShellManager {
         file_name.eq_ignore_ascii_case("wta") || file_name.eq_ignore_ascii_case("wta.exe")
     }
 
-    fn inject_wt_env(&self, config: &mut TerminalConfig) {
-        let Some(info) = &self.wt_connection_info else {
-            return;
-        };
-
-        if !config
-            .env
-            .iter()
-            .any(|(key, _)| key.eq_ignore_ascii_case("WT_PIPE_NAME"))
-        {
-            config
-                .env
-                .push(("WT_PIPE_NAME".to_string(), info.pipe_name.clone()));
-        }
-
-        if !config
-            .env
-            .iter()
-            .any(|(key, _)| key.eq_ignore_ascii_case("WT_MCP_TOKEN"))
-        {
-            config
-                .env
-                .push(("WT_MCP_TOKEN".to_string(), info.token.clone()));
-        }
-    }
-
-    /// Create a WT pane-backed terminal via the pipe protocol.
+    /// Create a WT pane-backed terminal.
     async fn create_terminal_wt(&self, config: &TerminalConfig) -> anyhow::Result<String> {
         let id = self.next_id();
         let wt = self.wt()?;
@@ -272,7 +237,7 @@ impl ShellManager {
 
     // ── get_output ──────────────────────────────────────────────────────
 
-    /// Get output. For WT panes this must be async (pipe call).
+    /// Get output. For WT panes this must be async (WT protocol call).
     pub async fn get_output(&self, terminal_id: &str) -> anyhow::Result<TerminalOutput> {
         let is_wt_pane = {
             let terminals = self.terminals.lock().unwrap();

@@ -5,17 +5,21 @@
 WTA (Windows Terminal Agent) is a Rust binary that bridges AI agent protocols with Windows Terminal.
 It provides three interfaces:
 
-- **ACP client** (default) -- TUI that spawns an agent CLI (Copilot, Claude, etc.) as a subprocess and communicates over ACP (Agent Client Protocol) via stdio JSON-RPC
-- **MCP server** (`wta mcp`) -- headless tool server that an external agent calls to interact with shells and Windows Terminal
-- **tmux-like CLI** (`wta list-panes`, `wta send-keys`, etc.) -- thin subcommands for controlling WT from the shell, useful for humans and agents that can shell out
+- **ACP client** (default) -- TUI that spawns an agent CLI (Copilot, Claude, Gemini, Codex, or a custom command) and communicates over ACP via stdio JSON-RPC.
+- **MCP server** (`wta mcp`) -- headless tool server that an external agent calls to interact with shells and Windows Terminal.
+- **CLI helpers** (`wta list-panes`, `wta capture-pane`, `wta new-tab`, etc.) -- thin commands for humans and agents that can shell out. Direct keystroke injection is not exposed by the CLI.
 
-Both ACP and MCP modes share a common ShellManager that routes operations to either local subprocesses or Windows Terminal panes via a named pipe. The CLI subcommands are lightweight wrappers that connect directly to the pipe without ShellManager.
+ACP and MCP modes share `ShellManager`, which routes operations to either local subprocesses or Windows Terminal panes. WT pane operations use a `WtChannel` abstraction:
+
+- `CliChannel` shells out to `wtcli.exe`, which calls WT's COM `IProtocolServer`.
+- `PipeChannel` uses an inherited anonymous pipe pair and is reserved for capability-gated methods, currently `send_input`.
+- `RoutedChannel` sends `send_input` to `PipeChannel` and falls back to `CliChannel` for the remaining methods.
 
 ## System Diagram
 
 ```
  Agent CLI (copilot/claude)     External agent       Human / AI shell-out
-       |  ACP/stdio                  |  MCP/stdio         |  CLI subcommands
+       |  ACP/stdio                  |  MCP/stdio         |  CLI helpers
        v                             v                    v
  +-----------+                +-----------+        +-------------+
  | ACP Mode  |                | MCP Mode  |        | CLI Mode    |
@@ -25,14 +29,23 @@ Both ACP and MCP modes share a common ShellManager that routes operations to eit
        |                             |                     |
        +---------------+-------------+                     |
                        |                                   |
-                 ShellManager                        PipeChannel
-                  |         |                        (direct call)
-           Local subprocess  WtChannel (named pipe)        |
-                                  |                        |
-                                  +------------------------+
-                                  |
-                         Windows Terminal
-                      ProtocolRequestHandler
+                 ShellManager                              |
+                       |                                   |
+                 RoutedChannel                             |
+                  |          |                             |
+                  |          +-----------------------------+
+                  |
+      +-----------+----------------+
+      |                            |
+ PipeChannel                 CliChannel
+ inherited HANDLE            wtcli.exe -> COM IProtocolServer
+ send_input only             reads + non-input WT control
+      |                            |
+      v                            v
+ TerminalProtocolPipeServer   TerminalProtocolComServer
+      \____________________________/
+                    |
+             Windows Terminal
 ```
 
 ## Protocol Stack
@@ -43,10 +56,11 @@ WTA acts as an ACP **client**. It spawns an agent CLI as a child process and spe
 
 - Crate: `agent-client-protocol = "0.10"`
 - Implementation: `src/protocol/acp/client.rs`
-- The agent sends requests (create_terminal, permission, etc.) and WTA handles them
-- Session notifications flow from agent to WTA: message chunks, tool calls, plans, status changes
+- The agent sends requests (`create_terminal`, `request_permission`, etc.) and WTA handles them.
+- Session notifications flow from agent to WTA: message chunks, tool calls, plans, and status changes.
 
 Key ACP message types handled:
+
 - `session/update` -- agent message chunks, tool calls, plan entries
 - `request_permission` -- permission dialog with options (allow/reject)
 - `create_terminal` / `terminal_output` / `wait_for_terminal_exit` -- agent-managed shells
@@ -54,16 +68,16 @@ Key ACP message types handled:
 
 ### MCP (Model Context Protocol)
 
-WTA acts as an MCP **server**. An external agent (via stdio) calls tools exposed by WTA.
+WTA acts as an MCP **server**. An external agent calls tools exposed by WTA over stdio.
 
 - Crate: `rmcp = "1.1"` with `#[tool_router]` / `#[tool_handler]` macros
 - Implementation: `src/protocol/mcp/server.rs`
 
-Tools exposed (15 total):
+Tools exposed:
 
 | Category | Tool | Description |
 |----------|------|-------------|
-| Shell | `run_command` | Execute command, return stdout+exit code |
+| Shell | `run_command` | Execute command, return stdout and exit code |
 | Shell | `create_terminal` | Spawn persistent terminal session |
 | Shell | `get_terminal_output` | Read buffered output |
 | Shell | `wait_for_terminal` | Block until exit |
@@ -76,38 +90,33 @@ Tools exposed (15 total):
 | WT Query | `wt_get_process_status` | Running/exit status |
 | WT Control | `wt_create_tab` | Create new tab |
 | WT Control | `wt_split_pane` | Split a pane |
-| WT Control | `wt_send_input` | Type text into a pane |
+| WT Control | `wt_send_input` | Type text into a pane via the inherited pipe when available |
 | WT Control | `wt_close_pane` | Close a pane |
 
-### Windows Terminal Protocol (Named Pipe)
+### WT COM Protocol
 
-WTA communicates with WT over a named pipe (`\\.\pipe\WindowsTerminal-<PID>`).
+Most WT operations flow through `wtcli.exe` to WT's out-of-process COM server.
 
-- Wire format: newline-delimited JSON-RPC 2.0
-- Authentication: token-based (empty token = dev bypass)
-- Implementation: `src/shell/wt_channel/pipe_channel.rs`
+- Client wrapper: `src/shell/wt_channel/cli_channel.rs`
+- CLI executable: `src/tools/wtcli/main.cpp`
+- IDL: `src/cascadia/TerminalProtocol/TerminalProtocol.idl`
+- WT-side server: `src/cascadia/WindowsTerminal/TerminalProtocolComServer.cpp`
+- Discovery: `WT_COM_CLSID`, injected into panes by WT
 
-```
-Request:  {"type":"request","id":"1","method":"list_windows","params":{}}\n
-Response: {"type":"response","id":"1","result":{"windows":[...]},"error":null}\n
-```
+The COM surface currently exposes reads and several mutations, including `list_*`, `read_pane_output`, `create_tab`, `split_pane`, `close_pane`, `focus_pane`, `quick_pick`, and event subscribe/publish. It does **not** expose direct shell input.
 
-WT-side handler: `src/cascadia/WindowsTerminal/ProtocolRequestHandler.cpp`
+### Per-WTA Inherited Pipe
 
-Supported methods (18):
-`authenticate`, `get_capabilities`, `get_active_pane`, `list_windows`, `list_tabs`, `list_panes`, `read_pane_output`, `get_process_status`, `get_session_variable`, `get_settings`, `create_tab`, `split_pane`, `close_pane`, `send_input`, `set_session_variable`, `set_settings`
+Shell input is capability-gated through an anonymous duplex pipe pair created by WT when it launches WTA.
 
-### VT Escape Sequences (Planned)
+- WTA-side client: `src/shell/wt_channel/pipe_channel.rs`
+- WT-side launcher: `src/cascadia/TerminalApp/WtaProcessLauncher.cpp`
+- WT-side server: `src/cascadia/TerminalApp/TerminalProtocolPipeServer.cpp`
+- Environment handles: `WT_PROTOCOL_PIPE_R` and `WT_PROTOCOL_PIPE_W`
+- Wire format: 4-byte little-endian length + JSON-RPC 2.0 body
+- Current methods: `hello`, `send_input`
 
-OSC 9001 sequences for in-pane communication (no external pipe needed):
-
-```
-WTA -> WT:  \x1b]9001;WtaReq;{json}\x07
-WT -> WTA:  \x1b]9001;WtaRes;{json}\x1b\\
-```
-
-C++ handler: `DoWTAction()` in `src/terminal/adapter/adaptDispatch.cpp`.
-Currently returns a simple ack; full pane identity plumbing is future work.
+WT passes only the WTA-side handles using `STARTUPINFOEX` + `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`. WTA consumes the handle values, removes the environment variables, and clears `HANDLE_FLAG_INHERIT` so child agent CLIs do not inherit the shell-input capability.
 
 ## Agent Integration
 
@@ -117,102 +126,85 @@ Currently returns a simple ack; full pane identity plumbing is future work.
 wta --agent "copilot --acp --stdio"
 ```
 
-WTA generates an MCP config file at startup pointing to `wta --mcp` and injects it:
-`copilot --acp --stdio --additional-mcp-config @<temp_path>`
+WTA generates an MCP config file at startup pointing to `wta mcp` and injects it with Copilot's `--additional-mcp-config` option.
 
-### Claude
+### Claude and Codex
+
+Claude and Codex are launched through ACP adapters:
 
 ```
-wta --agent "claude --acp --stdio"
+wta --agent "npx -y @zed-industries/claude-code-acp"
+wta --agent "npx -y @zed-industries/codex-acp"
 ```
 
-Uses `--mcp-config <path>` flag instead.
+The Terminal settings layer resolves the built-in agent IDs to these adapter commands.
 
-### Claude Agent ACP Adapter
+### Gemini
 
-The [zed-industries/claude-agent-acp](https://github.com/zed-industries/claude-agent-acp) adapter wraps Claude's SDK for ACP clients. WTA can connect to it as the agent subprocess.
-
-### CLI Subcommands (tmux-like)
-
-Agents that can shell out (or humans) can use WTA as a tmux-like CLI instead of MCP:
-
-| tmux command | wta subcommand | Alias | WT protocol method |
-|---|---|---|---|
-| `list-sessions` | `list-windows` | `lsw` | `list_windows` |
-| `list-windows` | `list-tabs` | `lst` | `list_tabs` |
-| `list-panes` | `list-panes` | `lsp` | `list_panes` |
-| `new-window` | `new-tab` | `neww` | `create_tab` |
-| `split-window` | `split-pane` | `splitw` | `split_pane` |
-| `send-keys` | `send-keys` | `send` | `send_input` |
-| `capture-pane -p` | `capture-pane` | `capturep` | `read_pane_output` |
-| `kill-pane` | `kill-pane` | `killp` | `close_pane` |
-| `display -p #{pane_id}` | `active-pane` | — | `get_active_pane` |
-| `wait-for` | `wait-for` | — | `get_process_status` (poll) |
-| — | `pane-status` | — | `get_process_status` |
-| — | `pipe-id` | — | (discovery only, no pipe call) |
-| — | `set-env` | `setenv` | (discovery only, no pipe call) |
-
-**send-keys** supports tmux key names: `Enter`, `Space`, `Escape`, `Tab`, `BSpace`, `C-c`, `C-d`, `C-{letter}`.
-
-### Pipe Connection
-
-WTA resolves the WT pipe using a priority chain:
-
-1. `--pipe-name <NAME>` CLI flag (highest priority)
-2. VT OSC 9001 discovery (works in any WT pane)
-3. `WT_PIPE_NAME` environment variable
-
-The `pipe-id` and `set-env` subcommands use the same chain but do not connect to the pipe -- they only resolve and print the info.
-
-```bash
-# Discover pipe
-wta pipe-id
-wta pipe-id --json
-
-# Export to shell environment
-eval "$(wta set-env)"                          # bash
-wta set-env -s powershell | Invoke-Expression  # PowerShell
-
-# Explicit pipe for any command
-wta --pipe-name '\\.\pipe\WT-12345' list-windows
-wta --pipe-name '\\.\pipe\WT-12345' --pipe-token 'abc' mcp
 ```
+wta --agent "gemini --experimental-acp"
+```
+
+### Custom agents
+
+Custom agents are configured through the Terminal settings (`custom:<cmd>` plus the stored custom command). WTA receives the resolved command line via `--agent`.
+
+## CLI Helpers
+
+Agents that can shell out, and humans debugging WTA, can use WTA as a small WT helper CLI:
+
+| Command | Alias | WT protocol method |
+|---|---|---|
+| `list-windows` | `lsw` | `list_windows` |
+| `list-tabs` | `lst` | `list_tabs` |
+| `list-panes` | `lsp` | `list_panes` |
+| `new-tab` | `neww` | `create_tab` |
+| `split-pane` | `splitw` | `split_pane` |
+| `capture-pane` | `capturep` | `read_pane_output` |
+| `kill-pane` | `killp` | `close_pane` |
+| `active-pane` | -- | `get_active_pane` |
+| `wait-for` | -- | delegated to `wtcli wait-for` |
+| `pane-status` | -- | `get_process_status` |
+| `listen` | `mon` | COM event subscribe |
+| `quick-pick` | -- | `quick_pick` |
+
+`send-keys` is intentionally not supported. Direct shell input must flow through a WT-launched WTA process that owns the inherited `WT_PROTOCOL_PIPE_R/W` handles.
+
+## Connection Discovery
+
+`CliChannel` uses `wtcli.exe`, and `wtcli.exe` discovers WT through `WT_COM_CLSID`. WT injects this environment variable into pane shells.
+
+The inherited pipe is separate from COM discovery. It is available only to WTA processes that WT launched with `WT_PROTOCOL_PIPE_R/W`; arbitrary shell-launched WTA processes cannot synthesize those handle capabilities.
+
+Legacy `--pipe-name`, `pipe-id`, and `set-env` CLI surfaces are retained only as compatibility shims around the current COM CLSID routing. They should not be described as a named-pipe security boundary.
 
 ## Pane Identity
 
-WTA discovers which WT pane it's running in via PID matching:
+WTA discovers which WT pane it is running in by PID matching:
 
-1. Call `list_windows` -> `list_tabs` -> `list_panes` over the pipe
-2. Each pane has a `pid` field
-3. Match against `std::process::id()`
-4. Store `(pane_id, tab_id, window_id)` in App state
-5. Displayed in status bar as `pane:X tab:Y`
+1. Call `list_windows` -> `list_tabs` -> `list_panes` through `CliChannel`.
+2. Each pane has a `pid` field.
+3. Match against `std::process::id()`.
+4. Store `(pane_id, tab_id, window_id)` in app state.
+5. Display the identity in the status bar.
 
 ## Logging
 
-WTA log files are written to the **current working directory of the `wta` process**. They are not written to a fixed app-data directory.
+WTA writes structured logs under the Intelligent Terminal runtime directory:
 
-Current log files:
+```
+%LOCALAPPDATA%\IntelligentTerminal\logs\
+```
 
-- `wta-acp-debug.log` -- ACP client / agent session log
-- `wta-mcp-debug.log` -- MCP server startup and tool log
-- `wta-pipe-debug.log` -- Windows Terminal named-pipe request/response log
+When running packaged, `%LOCALAPPDATA%` is redirected to the package sandbox.
 
-This matters when WTA is launched from a pane:
+Current process logs include:
 
-- If `wta` is launched while the pane cwd is `C:\Users\kaitao`, logs will be written under `C:\Users\kaitao\`
-- If `wta` is launched while the pane cwd is `C:\Users\kaitao\codes\agentic-terminal\wta`, logs will be written there instead
+- `wta-main.log` -- default ACP TUI mode
+- `wta-delegate.log` -- `wta delegate`
+- `wta-install-hooks.log` -- hook installation and removal
 
-For the March 24, 2026 run, the logs were found at:
-
-- `C:\Users\kaitao\wta-acp-debug.log`
-- `C:\Users\kaitao\wta-pipe-debug.log`
-
-Rule of thumb: if a log is "missing" from the repo, check the directory from which the pane launched `wta` first.
-
-Current limitation:
-
-- ACP child-process stderr is currently discarded, so some crashes can appear in the UI as a generic ACP shutdown error without a full root-cause trace in the debug logs.
+The log level is controlled by `WTA_LOG`; if unset, WTA defaults to a debug filter in `logging.rs`.
 
 ## Build Rule
 
