@@ -75,66 +75,64 @@ flowchart TB
     User[/User input/]
     LLM[/LLM provider/]
 
-    subgraph WTZone["🔐 WT Package (Trusted)"]
+    subgraph WTZone["🔐 WT Package (Trusted kernel context)"]
         WT(("WindowsTerminal.exe<br/>main process"))
-        ComSrv("TerminalProtocolComServer<br/>(COM object inside WT)")
-        PipeSrv("TerminalProtocolPipeServer<br/>(pipe handler inside WT)")
+        Scroll[("Pane scrollback<br/>in WT memory")]
+        ComSrv("TerminalProtocolComServer<br/>(MTA thread inside WT)")
+        PipeSrv("TerminalProtocolPipeServer<br/>(inherited pipe handler)")
     end
 
-    subgraph WTAZone["⚠️ Agent Host (Isolated child process)"]
-        WTA(("wta.exe<br/>WT-launched agent pane"))
+    subgraph WTAZone["⚠️ Agent Pane (WTA process)"]
+        WTA(("wta.exe<br/>ACP client"))
     end
 
-    subgraph AgentZone["⚠️ External Agent Process"]
+    subgraph AgentZone["⚠️ External Agent"]
         Agent(("Agent CLI<br/>copilot / claude / gemini"))
     end
 
-    subgraph PaneZone["🚨 Untrusted Pane (User-controlled)"]
-        Shell(("Pane shell"))
-        InPane(("Pane user process"))
+    subgraph PaneZone["🚨 Normal Pane (untrusted processes)"]
+        InPane(("User process in pane"))
     end
 
-    WTCLI["wtcli.exe<br/>(delegated client)"]
-    Settings[("settings.json")]
-    Logs[("WTA logs")]
-    Scroll[("Pane scrollback<br/>in WT memory")]
+    WTCLI(["🌉 wtcli.exe<br/>(COM protocol gateway)"])
+    Settings[("settings.json<br/>(filesystem)")]
+    Logs[("WTA logs<br/>(filesystem)")]
 
     User -- "terminal I/O<br/>key events" --> WT
     WT -- "rendered output<br/>display updates" --> User
 
-    WT == "inherited anon pipe<br/>C-PIPE: send_input" ==> WTA
-    WTA == "ACP stdio<br/>C-ACP" ==> Agent
+    WTA == "ACP stdio<br/>C-ACP: messages/tools/plans<br/>(JSON-RPC on Enter)" ==> Agent
     Agent == "HTTPS<br/>C-NET" ==> LLM
 
-    WTCLI -- "COM activation<br/>C-COM" --> ComSrv
-    WTA -- "creates wtcli<br/>on demand" -.-> WTCLI
-    ComSrv --> WT
-    PipeSrv --> WT
+    WTA -- "spawn wtcli<br/>for WT operations" --> WTCLI
+    WTA == "send_input via<br/>inherited pipe<br/>C-PIPE" ==> PipeSrv
+    InPane -- "spawn / invoke" --> WTCLI
+    WTCLI == "COM IProtocolServer<br/>C-COM: methods" ==> ComSrv
+    ComSrv -- "reads/writes" --> Scroll
+    ComSrv -- "executes in<br/>WT process" --> WT
 
-    InPane -. "COM client method<br/>allowed by context<br/>C-COM" .-> ComSrv
+    PipeSrv -- "injects into<br/>WT process" --> WT
 
-    WT -- "ConPTY stdin" --> Shell
-    Shell -- "stdout / VT / OSC<br/>C-VT" --> WT
-    Shell -. "spawn" .-> InPane
-    WT -. "capture" .-> Scroll
-    ComSrv -. "ReadPaneOutput<br/>via scrollback" .-> Scroll
+    InPane -. "COM IProtocolServer<br/>C-COM calls" .-> ComSrv
 
-    ComSrv == "SetSettings / GetSettings" ==> Settings
-    WTA -. "append logs" .-> Logs
+    ComSrv == "SetSettings /<br/>GetSettings" ==> Settings
+    WTA -. "write debug logs" .-> Logs
 
     classDef ext fill:#f0e0e0,stroke:#a04040,color:#000
     classDef wt fill:#d4e6f1,stroke:#1a5276,color:#000,stroke-width:3px
     classDef wta fill:#fce5cd,stroke:#b45911,color:#000,stroke-width:2px
     classDef agent fill:#ffe6e6,stroke:#c23b3b,color:#000,stroke-width:2px
     classDef pane fill:#ffcccc,stroke:#8b0000,color:#000,stroke-width:2px
-    classDef ds fill:#faf7f0,stroke:#666,color:#000
-    
+    classDef gateway fill:#fff4e6,stroke:#d97706,color:#000,stroke-width:3px
+    classDef ds fill:#faf7f0,stroke:#806040,color:#000
+
     class User,LLM ext
     class WT,ComSrv,PipeSrv wt
     class WTA wta
     class Agent agent
     class Shell,InPane pane
-    class WTCLI,Settings,Logs,Scroll ds
+    class WTCLI gateway
+    class Settings,Logs,Scroll ds
 
     style WTZone fill:#d4e6f1,stroke:#1a5276,stroke-width:3px,color:#000
     style WTAZone fill:#fce5cd,stroke:#b45911,stroke-width:2px,color:#000
