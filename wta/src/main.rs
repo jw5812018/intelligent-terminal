@@ -79,6 +79,13 @@ struct Cli {
     #[arg(long)]
     setup: Option<String>,
 
+    /// Initial TUI view to show on startup. `chat` (default) starts in the
+    /// chat view; `sessions` starts in the Agents (session list) view —
+    /// equivalent to the user pressing F2 right after the pane opens.
+    /// Wired to WT's Ctrl+Shift+/ binding via TerminalPage.
+    #[arg(long, value_enum, default_value_t = InitialView::Chat)]
+    initial_view: InitialView,
+
     // Legacy flags (hidden, backward compat)
     #[arg(long, hide = true)]
     info: bool,
@@ -302,6 +309,14 @@ impl HooksCliFilter {
             HooksCliFilter::Gemini => CliScope::One(CliKind::Gemini),
         }
     }
+}
+
+/// `--initial-view` selector. Drives whether the TUI starts in the chat
+/// view (default) or jumps straight to the Agents (session list) view.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum InitialView {
+    Chat,
+    Sessions,
 }
 
 // ─── Entry Point ────────────────────────────────────────────────────────────
@@ -1559,6 +1574,28 @@ async fn run_acp_app(
             // background callback can post AgentSessionEvent (specifically
             // ResumePaneAssigned) back into the event loop.
             app_state.set_agent_event_tx(event_tx.clone());
+
+            // Apply --initial-view: if `sessions`, jump straight into the
+            // Agents view (mirrors the F2 Chat→Agents toggle). Wired to
+            // WT's Ctrl+Shift+/ binding via `--initial-view sessions` on
+            // the wta cmdline. Must run after set_agent_event_tx so that
+            // ensure_history_loaded()'s event_tx clone is populated —
+            // otherwise the lazy scan would early-return and the Agents
+            // list would never populate.
+            //
+            // Skip in setup mode: --setup takes the FRE path and the user
+            // shouldn't be dropped into an empty session list.
+            if cli.setup.is_none() && cli.initial_view == InitialView::Sessions {
+                tracing::info!(target: "initial_view", "starting in Agents view");
+                app_state.current_tab_mut().current_view = app::View::Agents;
+                // Seed selection so Enter activates the first row immediately
+                // (mirrors the F2 enter-Agents path).
+                let has_sessions = !app_state.agent_sessions.iter_sorted().is_empty();
+                if has_sessions {
+                    app_state.current_tab_mut().agents_list_state.select(Some(0));
+                }
+                app_state.ensure_history_loaded();
+            }
 
             // NOTE: historical agent sessions used to be loaded here via
             // `history_loader::load_all()` (later as a `spawn_blocking`).

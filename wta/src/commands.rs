@@ -63,7 +63,7 @@ pub const REGISTRY: &[CommandSpec] = &[
     },
     CommandSpec {
         name: "sessions",
-        summary: "Open the historical sessions picker (same as F2)",
+        summary: "Open the historical sessions picker (Ctrl+Shift+/)",
         kind: CommandKind::Sessions,
         takes_args: false,
     },

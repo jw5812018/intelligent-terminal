@@ -583,6 +583,20 @@ pub fn classify_wt_event(method: &str, pane_id: &str, params: &serde_json::Value
                 age_ticks: 0,
             }
         }
+        "set_view" => {
+            // handle_event consumes set_view at the top of WtEvent before
+            // classification runs, so classify normally never sees it.
+            // Add an explicit arm anyway so a future refactor that drops
+            // the early return doesn't surface a stray "Pane: set_view"
+            // banner via the default catch-all.
+            WtNotification {
+                severity: WtEventSeverity::Informational,
+                pane_id: pane_id.to_string(),
+                summary: String::new(),
+                acknowledged: true,
+                age_ticks: 100,
+            }
+        }
         _ => WtNotification {
             severity: WtEventSeverity::Informational,
             pane_id: pane_id.to_string(),
@@ -2668,6 +2682,18 @@ impl App {
                 );
                 self.agent_sessions.merge_historical(sessions);
                 self.history_load_state = HistoryLoadState::Loaded;
+
+                // If the user is already on the Agents view (e.g. they were
+                // dropped there by --initial-view sessions, or they pressed
+                // F2 / Ctrl+Shift+/ before the scan finished) and nothing
+                // is selected yet, seed selection on row 0 so Enter
+                // activates immediately. Mirrors the F2 enter-Agents path.
+                if self.current_tab().current_view == View::Agents
+                    && self.current_tab().agents_list_state.selected().is_none()
+                    && !self.agent_sessions.iter_sorted().is_empty()
+                {
+                    self.current_tab_mut().agents_list_state.select(Some(0));
+                }
             }
             AppEvent::WtEvent {
                 method,
@@ -2728,6 +2754,66 @@ impl App {
                         self.switch_tab_session(new_tab_id.to_string());
                     } else {
                         tracing::warn!(target: "tab_session", "tab_changed: missing tab_id in params");
+                    }
+                    return;
+                }
+
+                // set_view: WT broadcasts this from Ctrl+Shift+/ (or any
+                // future "open agent pane in <view>" action) to switch the
+                // active TabSession's TUI view. Absolute (not toggle).
+                //
+                // Window-scoped: WT includes its own window_id; we ignore
+                // the event when our window_id is known and doesn't match,
+                // so multi-window setups don't cross-talk. When window_id
+                // is unknown on either side we apply (best-effort fallback).
+                //
+                // Processed BEFORE the own-pane skip below: this is a
+                // global UI command, not a per-pane signal.
+                if method == "set_view" {
+                    let target_window = params
+                        .get("window_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let our_window = self.window_id.as_deref().unwrap_or("");
+                    if !target_window.is_empty()
+                        && !our_window.is_empty()
+                        && target_window != our_window
+                    {
+                        tracing::debug!(
+                            target: "set_view",
+                            target_window,
+                            our_window,
+                            "ignoring set_view for different window"
+                        );
+                        return;
+                    }
+                    let view_str = params.get("view").and_then(|v| v.as_str()).unwrap_or("");
+                    tracing::info!(target: "set_view", view = view_str, "applying set_view");
+                    match view_str {
+                        "sessions" | "agents" => {
+                            let entering_agents =
+                                self.current_tab().current_view != View::Agents;
+                            let has_sessions =
+                                !self.agent_sessions.iter_sorted().is_empty();
+                            {
+                                let tab = self.current_tab_mut();
+                                tab.current_view = View::Agents;
+                                if tab.agents_list_state.selected().is_none()
+                                    && has_sessions
+                                {
+                                    tab.agents_list_state.select(Some(0));
+                                }
+                            }
+                            if entering_agents {
+                                self.ensure_history_loaded();
+                            }
+                        }
+                        "chat" => {
+                            self.current_tab_mut().current_view = View::Chat;
+                        }
+                        other => {
+                            tracing::warn!(target: "set_view", view = other, "unknown view");
+                        }
                     }
                     return;
                 }
@@ -3294,33 +3380,6 @@ impl App {
                 if button_count > 1 {
                     self.current_tab_mut().selected_button = (self.current_tab_mut().selected_button + button_count - 1) % button_count;
                 }
-            }
-            KeyCode::F(2) => {
-                // Toggle between Chat (default) and the Agents picker. Per
-                // tab — the active tab's TabSession holds the open state
-                // so other tabs are unaffected.
-                let has_sessions = !self.agent_sessions.iter_sorted().is_empty();
-                let entering_agents = self.current_tab().current_view == View::Chat;
-                {
-                    let tab = self.current_tab_mut();
-                    tab.current_view = match tab.current_view {
-                        View::Chat => {
-                            // Seed selection on first open if there's anything to select.
-                            if tab.agents_list_state.selected().is_none() && has_sessions {
-                                tab.agents_list_state.select(Some(0));
-                            }
-                            View::Agents
-                        }
-                        View::Agents => View::Chat,
-                    };
-                }
-                // Kick off the historical-sessions scan the first time the
-                // user actually asks to see the Agents view. No-op after
-                // the first call.
-                if entering_agents {
-                    self.ensure_history_loaded();
-                }
-                return;
             }
             KeyCode::F(12) => {
                 self.show_debug_panel = !self.show_debug_panel;

@@ -1462,6 +1462,31 @@ namespace winrt::TerminalApp::implementation
         _lastNotifiedAgentTabId = newTabIdx;
     }
 
+    // Broadcast a `set_view` event to wta so it switches its TUI view
+    // (Chat / Agents). Used by Ctrl+Shift+/ to drive the wta into the
+    // Agents (session list) view when the agent pane is already alive.
+    // For a fresh pane the same effect is achieved via the
+    // `--initial-view` CLI flag passed to wta on spawn.
+    void TerminalPage::_BroadcastAgentSetView(std::string_view view)
+    {
+        Json::Value evt;
+        evt["type"] = "event";
+        evt["method"] = "set_view";
+        Json::Value params;
+        params["view"] = std::string{ view };
+        // Scope to this WT window so multi-window users with multiple
+        // wta processes don't cross-talk. wta ignores the event when its
+        // own window_id is known and doesn't match.
+        params["window_id"] = std::to_string(_WindowProperties.WindowId());
+        evt["params"] = params;
+        Json::StreamWriterBuilder wb;
+        wb["indentation"] = "";
+        _agentPaneLog(std::string{ "broadcasting set_view event: view=" } + std::string{ view });
+        ProtocolVtSequenceReceived.raise(
+            *this,
+            winrt::to_hstring(Json::writeString(wb, evt)));
+    }
+
     // Reset every tab's AgentPaneOpen() flag. Called when the shared pane is
     // torn down (user-closed or process crash) so per-tab state doesn't refer
     // to a pane that no longer exists.
@@ -1957,9 +1982,9 @@ namespace winrt::TerminalApp::implementation
         _UpdateBottomBarState();
     }
 
-    void TerminalPage::_OpenOrReuseAgentPane(const winrt::hstring& prompt)
+    void TerminalPage::_OpenOrReuseAgentPane(const winrt::hstring& prompt, bool intoSessionsView)
     {
-        _agentPaneLog("_OpenOrReuseAgentPane called, prompt='" + winrt::to_string(prompt) + "'");
+        _agentPaneLog("_OpenOrReuseAgentPane called, prompt='" + winrt::to_string(prompt) + "', intoSessionsView=" + (intoSessionsView ? "true" : "false"));
 
         const auto& globals = _settings.GlobalSettings();
         std::wstring cmdline;
@@ -1999,6 +2024,11 @@ namespace winrt::TerminalApp::implementation
             if (!globals.AutoFixEnabled())
             {
                 cmdline += L" --no-autofix";
+            }
+
+            if (intoSessionsView)
+            {
+                cmdline += L" --initial-view sessions";
             }
         }
         else
@@ -2042,6 +2072,38 @@ namespace winrt::TerminalApp::implementation
                 return;
             }
 
+            if (intoSessionsView)
+            {
+                // Open-into-sessions semantics (Ctrl+Shift+/): never toggle
+                // closed. Force the active tab's flag on, reconcile (which
+                // moves the pane to the active tab and emits tab_changed),
+                // focus it, then broadcast set_view so wta switches the
+                // *new* active tab's TabSession into the Agents view.
+                const auto activeTab = _GetFocusedTabImpl();
+                if (!activeTab)
+                {
+                    return;
+                }
+                activeTab->AgentPaneOpen(true);
+                _agentPaneLog("intoSessionsView: forcing active tab AgentPaneOpen=true");
+                _ReconcileAgentPaneForActiveTab();
+
+                if (const auto pane = _FindAgentPane())
+                {
+                    if (const auto& content{ pane->GetContent() })
+                    {
+                        content.Focus(FocusState::Programmatic);
+                    }
+                }
+
+                // Order matters: tab_changed (raised inside reconcile via
+                // _NotifyAgentTabChanged) must reach wta before set_view so
+                // the view switch lands on the right TabSession.
+                _BroadcastAgentSetView("sessions");
+                _agentSessionsViewActive = true;
+                return;
+            }
+
             // Empty prompt: per-tab toggle. Flip the active tab's flag, then
             // reconcile the shared pane against it. The pane follows the
             // active tab — switching tabs preserves each tab's open/closed
@@ -2055,6 +2117,19 @@ namespace winrt::TerminalApp::implementation
             activeTab->AgentPaneOpen(wantOpen);
             _agentPaneLog(std::string{ "toggle: active tab AgentPaneOpen=" } + (wantOpen ? "true" : "false"));
             _ReconcileAgentPaneForActiveTab();
+            if (wantOpen)
+            {
+                // Transitioning hidden → visible via the chat keybinding
+                // (Ctrl+Shift+.). Force wta into chat view in case it was
+                // last left in the Agents view (the pane stays alive when
+                // hidden, so wta retains its previous view). Without this
+                // the user would press the chat key and still see the
+                // session list.
+                _BroadcastAgentSetView("chat");
+            }
+            // Toggle path opens to chat (default) or hides the pane —
+            // either way the sessions view is no longer active.
+            _agentSessionsViewActive = false;
             return;
         }
 
@@ -2149,6 +2224,7 @@ namespace winrt::TerminalApp::implementation
                 {
                     self->_agentPane.reset();
                     self->_lastNotifiedAgentTabId.reset();
+                    self->_agentSessionsViewActive = false;
                     self->_ClearAllAgentPaneFlags();
                     self->_UpdateBottomBarState();
                 }
@@ -2173,6 +2249,10 @@ namespace winrt::TerminalApp::implementation
 
         // The user explicitly asked to open it on this tab.
         activeTab->AgentPaneOpen(true);
+
+        // New pane: wta starts in whichever view --initial-view requested
+        // (chat by default; sessions when Ctrl+Shift+/ triggered the open).
+        _agentSessionsViewActive = intoSessionsView;
 
         _UpdateBottomBarState();
     }

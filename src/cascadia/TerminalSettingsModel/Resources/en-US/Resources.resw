@@ -752,6 +752,9 @@
   <data name="FocusAgentPaneCommandKey" xml:space="preserve">
     <value>Focus AI assistant pane</value>
   </data>
+  <data name="OpenAgentSessionsCommandKey" xml:space="preserve">
+    <value>Open AI assistant sessions list</value>
+  </data>
   <data name="TriggerAutofixCommandKey" xml:space="preserve">
     <value>Trigger autofix</value>
   </data>

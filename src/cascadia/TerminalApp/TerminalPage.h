@@ -368,6 +368,15 @@ namespace winrt::TerminalApp::implementation
         void _NotifyAgentTabChanged(const winrt::com_ptr<Tab>& targetTab);
         std::optional<uint32_t> _lastNotifiedAgentTabId{};
 
+        // Tracks whether the agent pane is currently displaying its Agents
+        // (session list) view. Drives Ctrl+Shift+/ toggle semantics: when
+        // true, the next press closes the pane; when false (chat or pane
+        // closed), the next press opens/switches to sessions view.
+        // Set whenever WT commands wta into a known view; cleared when the
+        // pane is closed. Note: F2 inside wta switches view without telling
+        // WT, so the flag can be briefly stale — one extra press resyncs.
+        bool _agentSessionsViewActive{ false };
+
         winrt::Windows::UI::Xaml::Controls::TextBox::LayoutUpdated_revoker _renamerLayoutUpdatedRevoker;
         int _renamerLayoutCount{ 0 };
         bool _renamerPressedEnter{ false };
@@ -610,8 +619,9 @@ namespace winrt::TerminalApp::implementation
         // received the handles).
         void _AttachAgentPanePipeServer(wil::unique_handle wtRead,
                                         wil::unique_handle wtWrite);
-        void _OpenOrReuseAgentPane(const winrt::hstring& prompt);
+        void _OpenOrReuseAgentPane(const winrt::hstring& prompt, bool intoSessionsView = false);
         void _FocusAgentPane();
+        void _BroadcastAgentSetView(std::string_view view);
         void _RepositionAgentPanes();
         static winrt::Microsoft::Terminal::Settings::Model::SplitDirection _AgentPanePositionToSplitDirection(const winrt::hstring& position);
 
