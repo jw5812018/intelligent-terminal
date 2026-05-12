@@ -38,6 +38,7 @@ Highest-priority residual risks:
 | **Event broadcast disclosure** | Legacy `agent_event` envelopes are broadcast to every subscribed COM caller; a pane-context subscriber can passively observe other panes' agent prompts and tool calls. | No per-subscriber filtering; only observed platform COM activation behavior gates `Subscribe`. |
 | **Prompt injection** | Capability transport proves that WTA is authorized; it does not prove the LLM's requested action is safe. | Confirmation settings exist in the settings model, but they default to `auto` and the current implementation does not enforce them on the runtime operation paths reviewed here. |
 | **Autofix-triggered context disclosure** | Crafted OSC 133 failure marks can trigger automatic Autofix analysis that reads source-pane context and sends it to the Agent CLI / LLM before any fix-execution confirmation. | `autoFixEnabled` defaults to `true`; no first-run opt-in or analysis-time confirmation is implemented. |
+| **Delegation context disclosure** | `wta delegate` / `?<prompt>` reads active-pane context and passes it to the delegate Agent CLI / LLM as startup prompt context. | No context-specific confirmation or redaction; the assembled delegate command line may also appear in process and diagnostic surfaces. |
 | **Scrollback/log disclosure** | Pane output and diagnostic logs may contain secrets, source code, prompts, or command output. | Redaction is not implemented. |
 | **Settings persistence via filesystem** | A process running as the user can overwrite `settings.json` and persistently change agent selection, Autofix behavior, or future AI policy knobs. | No meta-confirmation when WT reads policy-relevant settings and launches WTA / agent processes with those values. |
 
@@ -214,7 +215,7 @@ WTA also exposes helper CLI commands for humans, agents, diagnostics, and Settin
 | Category | Examples | Security-relevant behavior |
 |---|---|---|
 | WT operation helpers | `list-*`, `active-pane`, `capture-pane`, `pane-status`, `new-tab`, `split-pane`, `kill-pane`, `wait-for`, `listen` | Route reads, non-input mutations, and event subscription through `CliChannel` / `wtcli.exe` / COM. They do not create a separate trust boundary. |
-| Delegation helper | `delegate` | Creates a delegate Agent CLI workflow in a new WT tab using configured agent commandlines, cwd, and prompt text. This is an agent-launch surface, not a direct shell-input primitive. |
+| Delegation helper | `delegate` | Creates a delegate Agent CLI workflow in a new WT tab using configured agent commandlines, cwd, prompt text, and recent active-pane context when available. This is not a direct shell-input primitive, but it is a pane-context disclosure and agent-launch surface. |
 | Hook-management helpers | `hooks install`, `hooks status`, `hooks uninstall` | Use third-party Agent CLI plugin / extension managers and filesystem state. They affect persistent hook configuration and do not use the inherited pipe. |
 | Discovery / diagnostics helpers | `pipe-id`, `set-env` / `setenv`, `info`, `test-pipe` and legacy hidden flags | Expose or test WT protocol routing metadata such as `WT_COM_CLSID`. This metadata is not a bearer secret, but it helps a process locate the COM endpoint when observed platform activation behavior allows it. |
 
@@ -333,6 +334,20 @@ Agent CLI hook fires in a pane
 ```
 
 This bridge is a state / telemetry path, not a shell-control authorization path. It improves WTA's ability to display live Agent CLI sessions, tool activity, and notifications, but the event payload is untrusted. Any caller that can reach COM `SendEvent` can currently publish the same legacy `agent_event` shape, so WTA must not treat hook events as proof of agent identity, user approval, or possession of the inherited pipe capability.
+
+### 5.4 Delegation path
+
+```text
+user / command palette / wta helper
+  -> wta delegate / ?<prompt>
+  -> GetActivePane + ReadPaneOutput(active pane, 30 lines)
+  -> append "## Terminal Context" to delegate prompt
+  -> build delegate agent commandline
+  -> CreateTab(commandline)
+  -> delegate Agent CLI / LLM
+```
+
+Delegation is an agent-launch and context-transfer path, not a direct shell-input primitive. Current code enriches the delegate prompt with recent active-pane output when available, then builds a startup command line for the delegate Agent CLI. That means pane context can reach the delegate Agent CLI / LLM and may also appear in command-line inspection or diagnostic logging surfaces before any separate context-specific confirmation or redaction step.
 
 ---
 
