@@ -22,26 +22,22 @@ pub const DEBUG_SENT: Style = Style::new().fg(Color::Green);
 pub const DEBUG_RECEIVED: Style = Style::new().fg(Color::Cyan);
 pub const RECOMMENDATION_TITLE: Style = Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD);
 pub const RECOMMENDATION_DETAIL: Style = Style::new().fg(Color::Gray);
-// Card-style recommendation UI
-pub const CARD_BG: Color = Color::Rgb(45, 45, 45);
+// Card-style recommendation UI.
+// Border color = `#FFF @ 10%` over `#000`: 0×0.9 + 255×0.1 ≈ 26 → #1A1A1A.
+pub const CARD_FRAME_COLOR: Color = Color::Rgb(26, 26, 26);
 pub const BUTTON_BG: Color = Color::Rgb(70, 70, 70);
-pub const CARD_FILL: Style = Style::new().bg(CARD_BG);
-pub const CARD_BORDER: Style = Style::new().fg(Color::DarkGray).bg(CARD_BG);
-pub const CARD_BORDER_SELECTED: Style = Style::new().fg(Color::White).bg(CARD_BG);
-pub const CARD_CODE: Style = Style::new().fg(Color::White).bg(CARD_BG);
+pub const CARD_BORDER: Style = Style::new().fg(CARD_FRAME_COLOR);
+pub const CARD_BORDER_SELECTED: Style = Style::new().fg(CARD_FRAME_COLOR);
+pub const CARD_CODE: Style = Style::new().fg(Color::White);
 pub const CARD_DESCRIPTION: Style = Style::new()
     .fg(Color::Gray)
-    .bg(CARD_BG)
     .add_modifier(Modifier::ITALIC);
 pub const BUTTON: Style = Style::new().fg(Color::Gray).bg(BUTTON_BG);
 pub const BUTTON_FOCUSED: Style = Style::new()
     .fg(Color::Black)
     .bg(Color::White)
     .add_modifier(Modifier::BOLD);
-/// Non-focused button: plain white text on the card bg, no pill. Used for
-/// secondary actions in the recommendation card so only the focused button
-/// carries the white-pill highlight (matches Figma).
-pub const BUTTON_PLAIN: Style = Style::new().fg(Color::White).bg(CARD_BG);
+pub const BUTTON_PLAIN: Style = Style::new().fg(Color::White);
 // Chat message dot indicators
 pub const DOT_ERROR: Style = Style::new().fg(Color::Red).add_modifier(Modifier::BOLD);
 pub const DOT_AGENT: Style = Style::new().fg(Color::DarkGray);

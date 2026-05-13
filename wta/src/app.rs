@@ -4385,14 +4385,10 @@ impl App {
 const THOUGHT_PREVIEW_MAX_CHARS: usize = 1024;
 
 /// Computes the rendered height (in terminal rows) of a recommendation card.
-///
-/// Card structure: title + top border + content lines + separator + buttons + bottom border + blank
-/// Content lines wrap based on the inner width of the card.
-fn rec_card_height(choice: &RecommendationChoice, panel_width: u16) -> usize {
+pub(crate) fn rec_card_height(choice: &RecommendationChoice, panel_width: u16) -> usize {
     use crate::coordinator::RecommendedAction;
-    // Must match the wrapping width used in `recommendations::render`:
-    //   h_rec horizontal padding (1 + 1) + card outer indent (2 + 2) + inner card padding (2 + 2) = 10.
-    let inner_width = (panel_width as usize).saturating_sub(10).max(1);
+    // h_rec padding (1+1) + outer indent (2+2) + side borders (1+1) + inner padding (2+2) = 12.
+    let inner_width = (panel_width as usize).saturating_sub(12).max(1);
 
     let text = choice.actions.iter().find_map(|action| match action {
         RecommendedAction::Send { input, .. } => Some(input.clone()),
@@ -4425,9 +4421,7 @@ fn rec_card_height(choice: &RecommendationChoice, panel_width: u16) -> usize {
         .sum::<usize>()
         .max(1);
 
-    // title(at most 1) + top_pad(1) + content + divider(1) + buttons(1) + bottom_pad(1) + blank(1)
-    // No outer border — card is a filled rectangle with a single divider
-    // and one row of CARD_BG padding above/below the content groups.
+    // top_border + top_pad + content + divider + buttons + bottom_border + blank = 6 fixed rows.
     6 + content_lines
 }
 
