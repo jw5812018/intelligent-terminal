@@ -36,7 +36,16 @@
       <Build Solution="Debug|x64" Project="false" />
       <Build Solution="Release|x64" Project="false" />
     </Project>
-    <Project Path="src/host/ft_host/Host.FeatureTests.vcxproj" Id="8cdb8850-7484-4ec7-b45b-181f85b2ee54">
+    <Project Path="src/tools/wtcli/ft_fuzzer/WtcliFuzzer.vcxproj" Id="c5fae84e-310e-4cbc-8242-5ad6a37fdaa5">
+      <Platform Solution="*|Any CPU" Project="Win32" />
+      <Build Solution="*|Any CPU" Project="false" />
+      <Build Solution="*|ARM64" Project="false" />
+      <Build Solution="*|x86" Project="false" />
+      <Build Solution="AuditMode|x64" Project="false" />
+      <Build Solution="Debug|x64" Project="false" />
+      <Build Solution="Release|x64" Project="false" />
+    </Project>
+    <Project Path="src/host/ft_host/Host.FeatureTests.vcxproj"Id="8cdb8850-7484-4ec7-b45b-181f85b2ee54">
       <BuildDependency Project="src/host/exe/Host.EXE.vcxproj" />
       <BuildDependency Project="src/tools/nihilist/Nihilist.vcxproj" />
       <BuildDependency Project="src/types/lib/types.vcxproj" />
