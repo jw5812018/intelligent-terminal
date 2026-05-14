@@ -4054,6 +4054,52 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
+    // Inbound event from WTA: {method:"view_changed", params:{view}}.
+    //
+    // wta is the sole driver for two view transitions C++ can't observe by
+    // itself: Esc out of the Agents picker and the `/sessions` slash command.
+    // Both flip wta's internal `current_view` without going through
+    // `_BroadcastAgentSetView`, so without this echo the agent bar title
+    // would stay on "Agent sessions" after Esc, or fail to switch to it
+    // after `/sessions`, and the bottom bar's sessions/chat highlight (which
+    // reads `_agentSessionsViewActive`) would drift out of sync.
+    //
+    // Critically we do NOT call `_BroadcastAgentSetView` here — that would
+    // emit `set_view` back to wta and create a feedback loop. We only mirror
+    // the new view onto C++ state.
+    void TerminalPage::OnAgentViewChanged(hstring eventJson)
+    {
+        Json::Value evt;
+        Json::CharReaderBuilder rb;
+        std::istringstream ss(winrt::to_string(eventJson));
+        std::string errs;
+        if (!Json::parseFromStream(rb, ss, &evt, &errs))
+        {
+            return;
+        }
+        const auto& params = evt["params"];
+        if (!params.isObject() || !params.isMember("view") || !params["view"].isString())
+        {
+            return;
+        }
+        const auto view = params["view"].asString();
+        const bool sessions = (view == "sessions");
+
+        _agentPaneLog(std::string{ "OnAgentViewChanged: view=" } + view);
+
+        _agentSessionsViewActive = sessions;
+
+        if (const auto pane = _FindAgentPane())
+        {
+            if (const auto agent = pane->GetContent().try_as<winrt::TerminalApp::AgentPaneContent>())
+            {
+                agent.SetSessionsView(sessions);
+            }
+        }
+
+        _UpdateBottomBarState();
+    }
+
     // Inbound event from WTA: {method:"close_agent_pane", params:{...}}.
     // User pressed Ctrl+C twice in the agent pane TUI. Two paths:
     //

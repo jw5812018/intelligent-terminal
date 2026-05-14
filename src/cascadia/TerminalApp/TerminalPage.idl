@@ -136,5 +136,11 @@ namespace TerminalApp
         // Emitted when the user presses Ctrl+C twice in the agent pane TUI.
         // The page tears down the shared agent pane; wta dies with its ConPty.
         void OnCloseAgentPaneRequested(String eventJson);
+
+        // Inbound event from WTA carrying {method:"view_changed",params:{view}}.
+        // Emitted when the wta TUI flips its internal view (Esc out of Agents,
+        // `/sessions` slash command). Mirrors the new view onto C++ state so
+        // the agent bar title + bottom bar highlight stay in sync.
+        void OnAgentViewChanged(String eventJson);
     }
 }

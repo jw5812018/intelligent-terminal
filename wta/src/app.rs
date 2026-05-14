@@ -3353,6 +3353,7 @@ impl App {
                 }
                 KeyCode::Esc => {
                     self.current_tab_mut().current_view = View::Chat;
+                    self.emit_view_changed("chat");
                 }
                 _ => {}
             }
@@ -3938,6 +3939,7 @@ impl App {
                 // /sessions left the registry empty and rendered a blank view
                 // forever (state stuck at NotStarted, no Loading row, no rows).
                 self.ensure_history_loaded();
+                self.emit_view_changed("sessions");
             }
             CommandKind::Restart => {
                 // Full reconnect. Reset every tab: drop session_id (the
@@ -4836,6 +4838,23 @@ impl App {
                 "available_models": self.available_models,
                 "current_model_id": self.current_model_id,
             }
+        });
+        send_wt_protocol_event(evt.to_string());
+    }
+
+    /// Notify the host that the wta-internal view changed. C++ owns the
+    /// agent bar's title + the `_agentSessionsViewActive` flag that drives
+    /// the bottom bar; without this push the bar would stay on
+    /// "Agent sessions" after Esc / out of sync after `/sessions`.
+    ///
+    /// Only emit from paths where wta is the sole source of truth (Esc,
+    /// `/sessions`). The C++-originated `set_view` path already knows
+    /// what it asked for and updates its own state directly.
+    fn emit_view_changed(&self, view: &str) {
+        let evt = serde_json::json!({
+            "type": "event",
+            "method": "view_changed",
+            "params": { "view": view }
         });
         send_wt_protocol_event(evt.to_string());
     }

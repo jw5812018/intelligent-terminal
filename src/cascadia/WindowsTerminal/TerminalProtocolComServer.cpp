@@ -693,6 +693,16 @@ void TerminalProtocolComServer::SendEvent(winrt::hstring const& eventJson)
         return;
     }
 
+    // view_changed: wta TUI flipped its internal view (Esc out of Agents, or
+    // `/sessions` slash command). C++ mirrors the new view onto the agent bar
+    // title + the bottom bar's sessions/chat highlight.
+    if (evt.isMember("method") && evt["method"].isString() &&
+        evt["method"].asString() == "view_changed")
+    {
+        _dispatchViewChangedToPage(eventJson);
+        return;
+    }
+
     // Legacy path: params.event is required for agent_event broadcasts.
     THROW_HR_IF(E_INVALIDARG, !evt.isMember("params") || !evt["params"].isMember("event"));
 
@@ -806,6 +816,42 @@ void TerminalProtocolComServer::_dispatchCloseAgentPaneToPage(const winrt::hstri
                 try
                 {
                     page.OnCloseAgentPaneRequested(eventJson);
+                }
+                catch (...)
+                {
+                    // Swallow: page may have been torn down during dispatch.
+                }
+            });
+    }
+}
+
+void TerminalProtocolComServer::_dispatchViewChangedToPage(const winrt::hstring& eventJson)
+{
+    if (!s_emperor)
+    {
+        return;
+    }
+    // Same fan-out shape as the other dispatchers: the agent pane lives in
+    // exactly one window, but we don't know which from here, and pages with
+    // no agent pane no-op the call (see OnAgentViewChanged).
+    for (const auto& host : s_emperor->GetWindows())
+    {
+        auto page = _getPage(host.get());
+        if (!page)
+        {
+            continue;
+        }
+        const auto dispatcher = page.Dispatcher();
+        if (!dispatcher)
+        {
+            continue;
+        }
+        dispatcher.RunAsync(
+            winrt::Windows::UI::Core::CoreDispatcherPriority::Normal,
+            [page, eventJson]() {
+                try
+                {
+                    page.OnAgentViewChanged(eventJson);
                 }
                 catch (...)
                 {

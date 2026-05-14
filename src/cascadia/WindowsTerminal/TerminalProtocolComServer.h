@@ -134,5 +134,10 @@ private:
     // the user presses Ctrl+C twice. TerminalPage tears down the agent pane.
     static void _dispatchCloseAgentPaneToPage(const winrt::hstring& eventJson);
 
+    // Same shape, for {method:"view_changed"} emitted by the wta TUI when its
+    // internal view flips (Esc out of Agents, `/sessions` slash command).
+    // TerminalPage mirrors the new view onto its agent bar + bottom bar state.
+    static void _dispatchViewChangedToPage(const winrt::hstring& eventJson);
+
     static WindowEmperor* s_emperor;
 };
