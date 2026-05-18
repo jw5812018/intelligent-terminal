@@ -43,5 +43,6 @@ namespace Microsoft.Terminal.Settings.Model
         Windows.Foundation.Collections.IVector<String> AllowedCommandlines;
 
         Boolean AgentFreCompleted;
+        Boolean AgentWelcomeShown;
     }
 }

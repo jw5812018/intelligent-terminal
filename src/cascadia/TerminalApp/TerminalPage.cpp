@@ -768,8 +768,8 @@ namespace winrt::TerminalApp::implementation
         while (!cursor.empty())
         {
             for (const auto& relative : {
-                     std::filesystem::path{ L"wta\\target\\debug\\wta.exe" },
-                     std::filesystem::path{ L"wta\\target\\release\\wta.exe" },
+                     std::filesystem::path{ L"tools\\wta\\target\\debug\\wta.exe" },
+                     std::filesystem::path{ L"tools\\wta\\target\\release\\wta.exe" },
                  })
             {
                 const auto candidate = cursor / relative;
@@ -853,32 +853,53 @@ namespace winrt::TerminalApp::implementation
     {
         if (auto overlay = FindName(L"FreOverlayElement").try_as<winrt::TerminalApp::FreOverlay>())
         {
-            overlay.ResetDragOffset();
+            overlay.Initialize(_settings);
             overlay.Completed({ get_weak(), &TerminalPage::_OnFreCompleted });
             overlay.Visibility(Visibility::Visible);
+
+            // Hide the tab bar during FRE — the full-screen wizard replaces
+            // the entire window content. Restored in _OnFreCompleted.
+            TabRow().Visibility(Visibility::Collapsed);
         }
     }
 
     void TerminalPage::_OnFreCompleted(const winrt::TerminalApp::FreOverlay& /*sender*/,
                                        const winrt::Windows::Foundation::IInspectable& /*args*/)
     {
-        // Hide the overlay
+        // Hide the FRE overlay
         if (auto overlay = FreOverlayElement())
         {
             overlay.Visibility(Visibility::Collapsed);
         }
 
+        // Restore the tab bar
+        TabRow().Visibility(Visibility::Visible);
+
         // Persist: never show FRE again
         ApplicationState::SharedInstance().AgentFreCompleted(true);
 
-        // Agent pane was already created during startup with --setup.
-        // Focus it so the user can interact with the Getting Started screen.
-        if (const auto agentPane = _FindAgentPane())
+        // Flush settings to disk (FreOverlay already wrote to GlobalSettings
+        // via _OnSaveButtonClick; if the user closed without saving, defaults
+        // are used).
+        _lastAgentSettings = _CaptureAgentSettingsSnapshot();
+        try
         {
-            if (const auto& content = agentPane->GetContent())
-            {
-                content.Focus(winrt::Windows::UI::Xaml::FocusState::Programmatic);
-            }
+            _settings.WriteSettingsToDisk();
+        }
+        catch (...)
+        {
+            LOG_CAUGHT_EXCEPTION();
+        }
+
+        // Now create the agent pane — settings are already configured.
+        // No --setup first-run needed; WTA starts in normal mode.
+        // After FRE the pane should be visible so the user sees the
+        // welcome hint immediately.
+        if (const auto tab = _GetFocusedTabImpl())
+        {
+            _AutoCreateHiddenAgentPane(tab);
+            _OpenOrReuseAgentPane(L"");
+            // Focus is set in the Initialized callback once the pane is ready.
         }
     }
 
@@ -1679,7 +1700,6 @@ namespace winrt::TerminalApp::implementation
     // and autofix work in the background as long as the pane hasn't been closed.
     void TerminalPage::_AutoCreateHiddenAgentPane(winrt::com_ptr<Tab> tab)
     {
-        const bool isFirstRun = _IsFreRequired();
 
         // Already have a live pane — nothing to do.
         if (_agentPane.lock())
@@ -1757,11 +1777,6 @@ namespace winrt::TerminalApp::implementation
         if (!globals.AutoFixEnabled())
         {
             cmdline += L" --no-autofix";
-        }
-
-        if (isFirstRun)
-        {
-            cmdline += L" --setup first-run";
         }
 
         _agentPaneLog("_AutoCreateHiddenAgentPane: cmdline=" + winrt::to_string(winrt::hstring{ cmdline }));
@@ -1875,8 +1890,7 @@ namespace winrt::TerminalApp::implementation
                 weakRootPane,
                 weakSelfForHide,
                 termControlWeak = winrt::make_weak(termControl),
-                tokenHolder,
-                isFirstRun
+                tokenHolder
             ](auto&& /*sender*/, auto&& /*args*/) {
                 _agentPaneLog("_AutoCreateHiddenAgentPane: TermControl Initialized");
                 if (const auto tc = termControlWeak.get())
@@ -1894,14 +1908,6 @@ namespace winrt::TerminalApp::implementation
                 // else -- from here on, _ReconcileAgentPaneForActiveTab is
                 // free to manage visibility normally.
                 self->_agentPanePreWarming = false;
-
-                // During first-run, keep the pane visible so the user sees
-                // the Getting Started screen behind the FRE dialog overlay.
-                if (isFirstRun)
-                {
-                    self->_UpdateBottomBarState();
-                    return;
-                }
 
                 // If the user already toggled the agent pane open before
                 // Initialized fired, don't hide it -- that would leave the
@@ -1923,6 +1929,14 @@ namespace winrt::TerminalApp::implementation
                 {
                     _agentPaneLog("_AutoCreateHiddenAgentPane: TermControl Initialized -- user already opened pane, skipping hide");
                     self->_UpdateBottomBarState();
+                    // Focus agent pane (e.g. after FRE completes)
+                    if (auto pane = weakNewPane.lock())
+                    {
+                        if (const auto& content = pane->GetContent())
+                        {
+                            content.Focus(winrt::Windows::UI::Xaml::FocusState::Programmatic);
+                        }
+                    }
                     return;
                 }
                 _agentPaneLog("_AutoCreateHiddenAgentPane: TermControl Initialized -- hiding pane now");
@@ -1943,12 +1957,9 @@ namespace winrt::TerminalApp::implementation
             // behavior to avoid leaving a visible auto-created pane.
             _agentPaneLog("_AutoCreateHiddenAgentPane: no TermControl on new pane, hiding immediately");
             _agentPanePreWarming = false;
-            if (!isFirstRun)
+            if (const auto rootPane = tab->GetRootPane())
             {
-                if (const auto rootPane = tab->GetRootPane())
-                {
-                    rootPane->HidePane(newPane);
-                }
+                rootPane->HidePane(newPane);
             }
         }
 
@@ -2663,7 +2674,9 @@ namespace winrt::TerminalApp::implementation
         // that didn't run (e.g. the first tab was a non-terminal content type
         // and didn't have a TerminalControl), this gives us a second chance
         // on the first focused terminal tab.
-        if (!_agentPane.lock())
+        // Skip agent pane creation during FRE — the wizard handles it
+        // via _OnFreCompleted after the user configures their agent.
+        if (!_agentPane.lock() && !_IsFreRequired())
         {
             if (const auto firstTab = _GetFocusedTabImpl())
             {
@@ -4030,6 +4043,32 @@ namespace winrt::TerminalApp::implementation
         const auto state = pickStr("state");
 
         _agentPaneLog("OnAgentStatusChanged: payload=" + winrt::to_string(eventJson).substr(0, 600));
+
+        // If WTA signals a new agent selection (e.g. from FRE or preflight),
+        // persist it to settings so the next launch uses the same agent.
+        const auto selectedAgent = pickStr("selected_agent");
+        if (!selectedAgent.empty())
+        {
+            const auto& globals = _settings.GlobalSettings();
+            if (globals.AcpAgent() != selectedAgent)
+            {
+                globals.AcpAgent(selectedAgent);
+                // Update the snapshot so _RebuildAgentStack (triggered by
+                // the file-watcher after WriteSettingsToDisk) sees no diff
+                // and skips the teardown. The current WTA pane is already
+                // connected to the right agent.
+                _lastAgentSettings.acpAgent = std::wstring{ selectedAgent };
+                try
+                {
+                    _settings.WriteSettingsToDisk();
+                }
+                catch (...)
+                {
+                    LOG_CAUGHT_EXCEPTION();
+                }
+                _agentPaneLog("OnAgentStatusChanged: persisted acpAgent=" + winrt::to_string(selectedAgent));
+            }
+        }
 
         // Sync the process-wide model-list cache. The Settings UI's
         // AIAgentsViewModel reads from this on construction, so any new

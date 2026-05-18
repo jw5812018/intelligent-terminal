@@ -4,7 +4,7 @@
 // AgentHooksStatus.h
 //
 // Pure parser + formatter for the JSON contract emitted by
-// `wta hooks status --json` (see wta/src/agent_hooks_installer.rs ::
+// `wta hooks status --json` (see tools/wta/src/agent_hooks_installer.rs ::
 // StatusReport). Lives in src/cascadia/inc/ so the Settings UI
 // (TerminalSettingsEditor::AIAgentsViewModel) and the unit tests in
 // ut_app can both consume it without a project-reference cycle.

@@ -78,7 +78,7 @@ Detects command failures in other panes and auto-suggests fixes via the agent.
 
 **Requirements**: PowerShell shell integration (OSC 133 marks), agent pane open, `wtcli` on PATH.
 
-**Key code**: `wta/src/app.rs` (`classify_wt_event`, `maybe_trigger_autofix`), `TerminalPage.cpp:2650-2740` (event handlers), `TerminalProtocolComServer.cpp` (`_ensurePageEventsRegistered`).
+**Key code**: `tools/wta/src/app.rs` (`classify_wt_event`, `maybe_trigger_autofix`), `TerminalPage.cpp:2650-2740` (event handlers), `TerminalProtocolComServer.cpp` (`_ensurePageEventsRegistered`).
 
 **Diag log**: `wta-ensure-host.log` in the WTA log directory — shows event flow, classification, and autofix triggers.
 
@@ -114,11 +114,11 @@ There are two independent build systems. **Both must be built** before F5.
 # Kill stale WTA processes first
 taskkill //f //im wta.exe 2>/dev/null; true
 
-cargo build --target x86_64-pc-windows-msvc --manifest-path wta/Cargo.toml
-# Output: wta/target/x86_64-pc-windows-msvc/debug/wta.exe
+cargo build --target x86_64-pc-windows-msvc --manifest-path tools/wta/Cargo.toml
+# Output: tools/wta/target/x86_64-pc-windows-msvc/debug/wta.exe
 #
 # Always pass --target explicitly — the wapproj prefers
-# wta/target/<triple>/<profile>/wta.exe over the bare target/<profile>
+# tools/wta/target/<triple>/<profile>/wta.exe over the bare target/<profile>
 # fallback, and a stale explicit-target binary will silently shadow your
 # fresh bare-target build.
 ```
@@ -144,7 +144,7 @@ cmd.exe //c "tools\razzle.cmd && bcz no_clean"
 ```bash
 # 1. Build WTA (always use --target — see note above)
 taskkill //f //im wta.exe 2>/dev/null; true
-cargo build --target x86_64-pc-windows-msvc --manifest-path wta/Cargo.toml
+cargo build --target x86_64-pc-windows-msvc --manifest-path tools/wta/Cargo.toml
 
 # 2. Build & run Terminal from VS
 #    F5 in Visual Studio (CascadiaPackage project)
@@ -160,7 +160,7 @@ package identity to activate it via `CoCreateInstance`. This is why:
 
 - `wta.exe` is deployed **inside the package** (next to `WindowsTerminal.exe`)
 - `_DetectWtaPath()` prefers the co-located `wta.exe` over dev-build paths
-- Running `wta.exe` from `wta/target/debug/` directly will fail with
+- Running `wta.exe` from `tools/wta/target/debug/` directly will fail with
   `0x80073D54` (APPMODEL_ERROR_NO_PACKAGE) when calling COM methods
 
 If autofix or the agent pane stops working after a debug launch, check

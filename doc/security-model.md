@@ -496,13 +496,13 @@ When `bInheritHandles=TRUE` is used with `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`, in
 - `src/cascadia/TerminalConnection/ConptyConnection.{h,cpp}` - agent-pane WTA launch with inherited handles
 - `src/cascadia/WindowsTerminal/TerminalProtocolComServer.{h,cpp}` - COM surface
 - `src/cascadia/TerminalProtocol/TerminalProtocol.idl` - protocol interface
-- `wta/src/shell/wt_channel/pipe_channel.rs` - WTA inherited-pipe client
-- `wta/src/shell/wt_channel/routed_channel.rs` - pipe-vs-COM method routing
-- `wta/src/shell/wt_channel/cli_channel.rs` - `wtcli` fallback transport
-- `wta/src/main.rs`, `wta/src/coordinator.rs` - delegation context collection and delegate command-line construction
-- `wta/src/agent_registry.rs`, `wta/src/protocol/acp/client.rs` - Agent CLI / ACP adapter command construction and launch
-- `wta/src/agent_hooks_installer.rs` - `wt-agent-hooks` install / status / uninstall logic
-- `wta/wt-agent-hooks/` - Agent CLI hook bridge bundle and `send-event.ps1`
-- `wta/src/app.rs`, `wta/src/agent_sessions.rs` - hook event routing into WTA session state
+- `tools/wta/src/shell/wt_channel/pipe_channel.rs` - WTA inherited-pipe client
+- `tools/wta/src/shell/wt_channel/routed_channel.rs` - pipe-vs-COM method routing
+- `tools/wta/src/shell/wt_channel/cli_channel.rs` - `wtcli` fallback transport
+- `tools/wta/src/main.rs`, `tools/wta/src/coordinator.rs` - delegation context collection and delegate command-line construction
+- `tools/wta/src/agent_registry.rs`, `tools/wta/src/protocol/acp/client.rs` - Agent CLI / ACP adapter command construction and launch
+- `tools/wta/src/agent_hooks_installer.rs` - `wt-agent-hooks` install / status / uninstall logic
+- `tools/wta/wt-agent-hooks/` - Agent CLI hook bridge bundle and `send-event.ps1`
+- `tools/wta/src/app.rs`, `tools/wta/src/agent_sessions.rs` - hook event routing into WTA session state
 - `src/tools/wtcli/main.cpp` - CLI surface
 - STRIDE methodology

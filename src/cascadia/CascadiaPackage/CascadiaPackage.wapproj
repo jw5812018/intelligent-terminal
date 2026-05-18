@@ -120,23 +120,23 @@
        Profile defaults to "debug" for Debug builds and "release" for everything
        else, so a Debug F5 picks up plain `cargo build` output. -->
   <ItemGroup>
-    <Content Include="$(SolutionDir)wta\target\$(WtaRustTarget)\$(WtaRustProfile)\wta.exe"
-             Condition="Exists('$(SolutionDir)wta\target\$(WtaRustTarget)\$(WtaRustProfile)\wta.exe')">
+    <Content Include="$(SolutionDir)tools\wta\target\$(WtaRustTarget)\$(WtaRustProfile)\wta.exe"
+             Condition="Exists('$(SolutionDir)tools\wta\target\$(WtaRustTarget)\$(WtaRustProfile)\wta.exe')">
       <Link>wta.exe</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
-    <Content Include="$(SolutionDir)wta\target\$(WtaRustProfile)\wta.exe"
-             Condition="!Exists('$(SolutionDir)wta\target\$(WtaRustTarget)\$(WtaRustProfile)\wta.exe') And Exists('$(SolutionDir)wta\target\$(WtaRustProfile)\wta.exe')">
+    <Content Include="$(SolutionDir)tools\wta\target\$(WtaRustProfile)\wta.exe"
+             Condition="!Exists('$(SolutionDir)tools\wta\target\$(WtaRustTarget)\$(WtaRustProfile)\wta.exe') And Exists('$(SolutionDir)tools\wta\target\$(WtaRustProfile)\wta.exe')">
       <Link>wta.exe</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
-    <Content Include="$(SolutionDir)wta\target\$(WtaRustTarget)\$(WtaRustFallbackProfile)\wta.exe"
-             Condition="!Exists('$(SolutionDir)wta\target\$(WtaRustTarget)\$(WtaRustProfile)\wta.exe') And !Exists('$(SolutionDir)wta\target\$(WtaRustProfile)\wta.exe') And Exists('$(SolutionDir)wta\target\$(WtaRustTarget)\$(WtaRustFallbackProfile)\wta.exe')">
+    <Content Include="$(SolutionDir)tools\wta\target\$(WtaRustTarget)\$(WtaRustFallbackProfile)\wta.exe"
+             Condition="!Exists('$(SolutionDir)tools\wta\target\$(WtaRustTarget)\$(WtaRustProfile)\wta.exe') And !Exists('$(SolutionDir)tools\wta\target\$(WtaRustProfile)\wta.exe') And Exists('$(SolutionDir)tools\wta\target\$(WtaRustTarget)\$(WtaRustFallbackProfile)\wta.exe')">
       <Link>wta.exe</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
-    <Content Include="$(SolutionDir)wta\target\$(WtaRustFallbackProfile)\wta.exe"
-             Condition="!Exists('$(SolutionDir)wta\target\$(WtaRustTarget)\$(WtaRustProfile)\wta.exe') And !Exists('$(SolutionDir)wta\target\$(WtaRustProfile)\wta.exe') And !Exists('$(SolutionDir)wta\target\$(WtaRustTarget)\$(WtaRustFallbackProfile)\wta.exe') And Exists('$(SolutionDir)wta\target\$(WtaRustFallbackProfile)\wta.exe')">
+    <Content Include="$(SolutionDir)tools\wta\target\$(WtaRustFallbackProfile)\wta.exe"
+             Condition="!Exists('$(SolutionDir)tools\wta\target\$(WtaRustTarget)\$(WtaRustProfile)\wta.exe') And !Exists('$(SolutionDir)tools\wta\target\$(WtaRustProfile)\wta.exe') And !Exists('$(SolutionDir)tools\wta\target\$(WtaRustTarget)\$(WtaRustFallbackProfile)\wta.exe') And Exists('$(SolutionDir)tools\wta\target\$(WtaRustFallbackProfile)\wta.exe')">
       <Link>wta.exe</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
@@ -149,8 +149,8 @@
        the loose copy is present. Excludes hook-debug/ (dev utility, not
        part of the install bundle) and *.md (developer docs). -->
   <ItemGroup>
-    <Content Include="$(SolutionDir)wta\wt-agent-hooks\**"
-             Exclude="$(SolutionDir)wta\wt-agent-hooks\hook-debug\**;$(SolutionDir)wta\wt-agent-hooks\**\*.md">
+    <Content Include="$(SolutionDir)tools\wta\wt-agent-hooks\**"
+             Exclude="$(SolutionDir)tools\wta\wt-agent-hooks\hook-debug\**;$(SolutionDir)tools\wta\wt-agent-hooks\**\*.md">
       <Link>wt-agent-hooks\%(RecursiveDir)%(Filename)%(Extension)</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>

@@ -232,7 +232,8 @@ namespace winrt::TerminalApp::implementation
         // and _AutoCreateHiddenAgentPane only does local work (filesystem
         // path detection + creating + hiding a child pane), so it is safe
         // to call synchronously here.
-        if (!_agentPane.lock())
+        // Skip agent pane creation during FRE — _OnFreCompleted handles it.
+        if (!_agentPane.lock() && !_IsFreRequired())
         {
             _AutoCreateHiddenAgentPane(newTabImpl);
         }

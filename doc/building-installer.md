@@ -37,7 +37,7 @@ Five lines, in order. Step details below.
 ```powershell
 # 0. Bump manifest + _sign_msix.cmd to the new version
 # 1. (skipped — cert is committed)
-# 2. cargo build --release --target {x86_64,aarch64}-pc-windows-msvc --manifest-path wta/Cargo.toml
+# 2. cargo build --release --target {x86_64,aarch64}-pc-windows-msvc --manifest-path tools/wta/Cargo.toml
 # 3. .\_build_msix_x64.cmd   AND THEN   .\_build_msix_arm64.cmd      # serial — see note
 # 4. .\_sign_msix.cmd
 # 5. powershell -File build\scripts\assemble-msix-zip.ps1 -Version 0.7.0.X -Arch x64
@@ -76,19 +76,19 @@ That script produces `CascadiaPackage_TemporaryKey.pfx` (gitignored) — you'd t
 
 ```powershell
 # x64
-cargo build --release --target x86_64-pc-windows-msvc --manifest-path wta/Cargo.toml
+cargo build --release --target x86_64-pc-windows-msvc --manifest-path tools/wta/Cargo.toml
 
 # ARM64 (cross-compile)
-cargo build --release --target aarch64-pc-windows-msvc --manifest-path wta/Cargo.toml
+cargo build --release --target aarch64-pc-windows-msvc --manifest-path tools/wta/Cargo.toml
 ```
 
 These two are independent — run them in parallel if you want.
 
 MSBuild picks up `wta.exe` automatically from the Cargo output via a `<Content>` rule in `CascadiaPackage.wapproj`:
-- x64: `wta\target\x86_64-pc-windows-msvc\release\wta.exe`
-- ARM64: `wta\target\aarch64-pc-windows-msvc\release\wta.exe`
+- x64: `tools\wta\target\x86_64-pc-windows-msvc\release\wta.exe`
+- ARM64: `tools\wta\target\aarch64-pc-windows-msvc\release\wta.exe`
 
-> **Always pass `--target` explicitly.** The wapproj's `<Content>` items prefer `wta\target\<triple>\release\wta.exe` over the bare `wta\target\release\wta.exe` fallback. If a stale binary exists at the explicit-target path (e.g., from a previous `--target` build), a bare `cargo build --release` writes to a different directory and MSBuild silently packages the stale one. Using `--target` for both arches keeps the two paths symmetric and avoids the trap. 0.7.0.0 and 0.7.0.1 were burned by this.
+> **Always pass `--target` explicitly.** The wapproj's `<Content>` items prefer `tools\wta\target\<triple>\release\wta.exe` over the bare `tools\wta\target\release\wta.exe` fallback. If a stale binary exists at the explicit-target path (e.g., from a previous `--target` build), a bare `cargo build --release` writes to a different directory and MSBuild silently packages the stale one. Using `--target` for both arches keeps the two paths symmetric and avoids the trap. 0.7.0.0 and 0.7.0.1 were burned by this.
 
 > **Always re-run cargo even if you think source didn't change.** Cargo's incremental check is fast (~seconds for a no-op) and serves as cheap insurance against the "wta source did change but I forgot" footgun that bit 0.7.0.12.
 
@@ -211,7 +211,7 @@ Built by [`build\scripts\New-WtaLocalInstaller.ps1`](../build/scripts/New-WtaLoc
 
 # Skip WTA rebuild too (use a pre-built wta.exe):
 .\build\scripts\New-WtaLocalInstaller.ps1 -Platform x64 -Configuration Release `
-    -SkipWtaBuild -WtaExePath wta\target\x86_64-pc-windows-msvc\release\wta.exe
+    -SkipWtaBuild -WtaExePath tools\wta\target\x86_64-pc-windows-msvc\release\wta.exe
 ```
 
 ### Parameters
@@ -258,8 +258,8 @@ Options (pass to `install.cmd`): `/quiet`, `/nopath`, `/noshortcuts`
 | Goal | Command |
 |------|---------|
 | Generate dev cert (one-time / expired) | [`powershell -File build\scripts\New-DevSigningCert.ps1`](../build/scripts/New-DevSigningCert.ps1) |
-| Build wta (x64) | `cargo build --release --target x86_64-pc-windows-msvc --manifest-path wta/Cargo.toml` |
-| Build wta (ARM64) | `cargo build --release --target aarch64-pc-windows-msvc --manifest-path wta/Cargo.toml` |
+| Build wta (x64) | `cargo build --release --target x86_64-pc-windows-msvc --manifest-path tools/wta/Cargo.toml` |
+| Build wta (ARM64) | `cargo build --release --target aarch64-pc-windows-msvc --manifest-path tools/wta/Cargo.toml` |
 | Build MSIX (x64) | [`.\_build_msix_x64.cmd`](../_build_msix_x64.cmd) |
 | Build MSIX (ARM64) | [`.\_build_msix_arm64.cmd`](../_build_msix_arm64.cmd) |
 | Sign both MSIXs | [`.\_sign_msix.cmd`](../_sign_msix.cmd) |

@@ -3,29 +3,26 @@
 
 namespace TerminalApp
 {
+    // Lightweight data class for the agent ComboBox in the FRE wizard.
+    runtimeclass FreAgentEntry
+    {
+        FreAgentEntry();
+        String Id;
+        String DisplayLabel;
+    }
+
     [default_interface] runtimeclass FreOverlay : Windows.UI.Xaml.Controls.UserControl
     {
         FreOverlay();
 
-        // x:Bind properties for localized strings
-        String FreTitle{ get; };
-        String Card1Title{ get; };
-        String Card1Description{ get; };
-        String Card2Title{ get; };
-        String Card2Description{ get; };
-        String Card3Title{ get; };
-        String Card3Description{ get; };
-        String Card4Title{ get; };
-        String Card4Description{ get; };
-        String DetailTitle{ get; };
-        String DetailDescription{ get; };
-        String DetailLink{ get; };
-        String NextButtonText{ get; };
+        // Initialize the wizard with settings so it can read defaults and
+        // populate the agent dropdown. Must be called before showing.
+        void Initialize(Microsoft.Terminal.Settings.Model.CascadiaSettings settings);
 
         // Reset drag offset so the dialog appears centered.
         void ResetDragOffset();
 
-        // Raised when the user clicks "Start exploring" or the close button.
+        // Raised when the user clicks "Save" or the close button.
         event Windows.Foundation.TypedEventHandler<FreOverlay, Object> Completed;
     }
 }

@@ -43,7 +43,8 @@ namespace winrt::Microsoft::Terminal::Settings::Model::implementation
     X(FileSource::Local, Windows::Foundation::Collections::IVector<hstring>, AllowedCommandlines, "allowedCommandlines")                                                  \
     X(FileSource::Local, std::unordered_set<hstring>, DismissedBadges, "dismissedBadges")                                                                                 \
     X(FileSource::Shared, bool, SSHFolderGenerated, "sshFolderGenerated", false)                                                                                  \
-    X(FileSource::Shared, bool, AgentFreCompleted, "agentFreCompleted", false)
+    X(FileSource::Shared, bool, AgentFreCompleted, "agentFreCompleted", false)                                                                                  \
+    X(FileSource::Shared, bool, AgentWelcomeShown, "agentWelcomeShown", false)
 
     struct WindowLayout : WindowLayoutT<WindowLayout>
     {

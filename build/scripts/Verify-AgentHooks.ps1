@@ -36,7 +36,7 @@
 .PARAMETER WtaPath
     Override path to wta.exe. Defaults to a sibling of this script (the
     MSIX layout deposits Verify-AgentHooks.ps1 next to wta.exe), then
-    PATH lookup, then the dev-tree fallback under wta/target/{debug,release}.
+    PATH lookup, then the dev-tree fallback under tools/wta/target/{debug,release}.
 
 .PARAMETER StatusJson
     Bypass spawning wta and feed the supplied JSON straight through the
@@ -74,7 +74,7 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 # Schema version this script understands. Mirrors STATUS_SCHEMA_VERSION
-# in wta/src/agent_hooks_installer.rs and SupportedStatusSchemaVersion
+# in tools/wta/src/agent_hooks_installer.rs and SupportedStatusSchemaVersion
 # in src/cascadia/inc/AgentHooksStatus.h. Bump in lockstep.
 $script:SupportedStatusSchemaVersion = 3
 
@@ -111,11 +111,11 @@ function Resolve-WtaPath {
     }
 
     # 3. Dev-tree fallback — walk up from the script directory until we
-    #    find wta/target/{debug,release}/wta.exe.
+    #    find tools/wta/target/{debug,release}/wta.exe.
     $cursor = (Get-Item $PSScriptRoot).FullName
     while ($cursor) {
         foreach ($cfg in @('debug', 'release')) {
-            $candidate = Join-Path $cursor "wta\target\$cfg\wta.exe"
+            $candidate = Join-Path $cursor "tools\wta\target\$cfg\wta.exe"
             if (Test-Path -LiteralPath $candidate -PathType Leaf) {
                 return (Resolve-Path -LiteralPath $candidate).Path
             }
@@ -146,7 +146,7 @@ function Invoke-WtaCommand {
 }
 
 # Get the parsed status report. Returns a PSCustomObject mirroring
-# StatusReport in wta/src/agent_hooks_installer.rs.
+# StatusReport in tools/wta/src/agent_hooks_installer.rs.
 function Get-AgentHooksStatus {
     [CmdletBinding()]
     param(

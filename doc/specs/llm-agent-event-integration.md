@@ -509,7 +509,7 @@ agent status in its status bar — replacing the current `get_process_status` po
 ### Phase 2 — WT-native events (builds on shell integration work)
 
 Leverage the event types proposed in
-[terminal-acp-shell-integration.md](../../../wta/terminal-acp-shell-integration.md):
+[terminal-acp-shell-integration.md](../../../tools/wta/terminal-acp-shell-integration.md):
 
 - [ ] `pane.process.exited` — emitted by WT when a pane's child process exits
 - [ ] `pane.cwd.changed` — emitted when CWD changes (OSC 7 / OSC 9;9)

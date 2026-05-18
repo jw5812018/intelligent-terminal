@@ -339,7 +339,8 @@
         <!--  First-run experience overlay. Covers the terminal content area
               until the user clicks Next. Lazy-loaded to avoid startup cost.  -->
         <local:FreOverlay x:Name="FreOverlayElement"
-                          Grid.Row="2"
+                          Grid.Row="0"
+                          Grid.RowSpan="4"
                           HorizontalAlignment="Stretch"
                           VerticalAlignment="Stretch"
                           x:Load="False"

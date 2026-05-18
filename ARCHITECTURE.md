@@ -110,7 +110,7 @@ WTA Library (Rust)
 ## WTA Rust Crate Structure
 
 ```
-wta/
+tools/wta/
 ├── Cargo.toml                  # [lib] + [[bin]] targets
 ├── src/
 │   ├── lib.rs                  # Public API for lib mode (C-ABI)

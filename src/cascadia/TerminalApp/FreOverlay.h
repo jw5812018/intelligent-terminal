@@ -3,28 +3,31 @@
 
 #pragma once
 
+#include "FreAgentEntry.g.h"
 #include "FreOverlay.g.h"
 
 namespace winrt::TerminalApp::implementation
 {
+    struct FreAgentEntry : FreAgentEntryT<FreAgentEntry>
+    {
+        FreAgentEntry() = default;
+
+        winrt::hstring Id() const { return _id; }
+        void Id(const winrt::hstring& value) { _id = value; }
+        winrt::hstring DisplayLabel() const { return _displayLabel; }
+        void DisplayLabel(const winrt::hstring& value) { _displayLabel = value; }
+
+    private:
+        winrt::hstring _id;
+        winrt::hstring _displayLabel;
+    };
+
     struct FreOverlay : FreOverlayT<FreOverlay>
     {
         FreOverlay();
 
-        // x:Bind properties for localized strings
-        winrt::hstring FreTitle();
-        winrt::hstring Card1Title();
-        winrt::hstring Card1Description();
-        winrt::hstring Card2Title();
-        winrt::hstring Card2Description();
-        winrt::hstring Card3Title();
-        winrt::hstring Card3Description();
-        winrt::hstring Card4Title();
-        winrt::hstring Card4Description();
-        winrt::hstring DetailTitle();
-        winrt::hstring DetailDescription();
-        winrt::hstring DetailLink();
-        winrt::hstring NextButtonText();
+        // Initialize with settings to populate controls.
+        void Initialize(const winrt::Microsoft::Terminal::Settings::Model::CascadiaSettings& settings);
 
         // Event — sender must be the WinRT projected type.
         til::typed_event<winrt::TerminalApp::FreOverlay, winrt::Windows::Foundation::IInspectable> Completed;
@@ -32,49 +35,38 @@ namespace winrt::TerminalApp::implementation
         // XAML event handlers — must be public for generated code access.
         void _OnNextButtonClick(const winrt::Windows::Foundation::IInspectable& sender,
                                 const winrt::Windows::UI::Xaml::RoutedEventArgs& args);
+        void _OnSaveButtonClick(const winrt::Windows::Foundation::IInspectable& sender,
+                                const winrt::Windows::UI::Xaml::RoutedEventArgs& args);
         void _OnCloseButtonClick(const winrt::Windows::Foundation::IInspectable& sender,
                                  const winrt::Windows::UI::Xaml::RoutedEventArgs& args);
-        void _OnNavItemTapped(const winrt::Windows::Foundation::IInspectable& sender,
-                              const winrt::Windows::UI::Xaml::Input::TappedRoutedEventArgs& args);
+        void _OnAgentSelectionChanged(const winrt::Windows::Foundation::IInspectable& sender,
+                                      const winrt::Windows::UI::Xaml::Controls::SelectionChangedEventArgs& args);
 
-        // Drag handlers for the title bar.
-        void _OnTitleBarPointerPressed(const winrt::Windows::Foundation::IInspectable& sender,
-                                       const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs& e);
-        void _OnTitleBarPointerMoved(const winrt::Windows::Foundation::IInspectable& sender,
-                                     const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs& e);
-        void _OnTitleBarPointerReleased(const winrt::Windows::Foundation::IInspectable& sender,
-                                        const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs& e);
-        void _OnTitleBarPointerCaptureLost(const winrt::Windows::Foundation::IInspectable& sender,
-                                           const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs& e);
-
-        // Reset drag offset (called when overlay becomes visible).
+        // No-op kept for IDL compatibility.
         void ResetDragOffset();
 
     private:
-        int32_t _selectedIndex{ 0 };
+        winrt::Microsoft::Terminal::Settings::Model::CascadiaSettings _settings{ nullptr };
 
-        // Per-section detail strings (title, description).
-        static constexpr int32_t NavItemCount = 4;
-        std::array<winrt::hstring, NavItemCount> _detailTitles;
-        std::array<winrt::hstring, NavItemCount> _detailDescs;
+        // Detect whether an executable is on PATH.
+        static bool _IsAgentInstalled(const wchar_t* name);
+        static bool _IsNodeInstalled();
 
-        void _SelectNavItem(int32_t index);
+        // Run a winget install synchronously on a background thread.
+        // Returns true on success.
+        static winrt::Windows::Foundation::IAsyncOperation<bool> _WingetInstallAsync(winrt::hstring packageId);
 
-        // Drag state for moving the dialog by its title bar.
-        bool _titleBarDragging{ false };
-        winrt::Windows::Foundation::Point _dragStartPointer{};
-        double _dragStartTranslateX{ 0.0 };
-        double _dragStartTranslateY{ 0.0 };
+        // Run wta.exe hooks install on a background thread.
+        static winrt::Windows::Foundation::IAsyncAction _InstallHooksAsync(winrt::hstring agentId);
 
-        // Clamp the dialog translate so it doesn't leave the visible area.
-        void _ClampDialogPosition();
 
-        // Size-changed handler token for the root grid.
-        winrt::event_token _rootSizeChangedToken{};
+        // Perform the full save + install flow asynchronously.
+        winrt::Windows::Foundation::IAsyncAction _SaveAndInstallAsync();
     };
 }
 
 namespace winrt::TerminalApp::factory_implementation
 {
+    BASIC_FACTORY(FreAgentEntry);
     BASIC_FACTORY(FreOverlay);
 }

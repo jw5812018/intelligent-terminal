@@ -97,16 +97,22 @@ function Clear-CopilotCredentials {
     Write-Host "`n[3] Clearing GitHub Copilot credentials..." -ForegroundColor Cyan
 
     # Remove from Windows Credential Manager
+    # cmdkey /list shows lines like:
+    #     Target: LegacyGeneric:target=copilot-cli/https://github.com:user
+    # cmdkey /delete needs the part after "target=" as the key
+    $found = $false
     $creds = & cmd /c "cmdkey /list 2>&1"
-    $targets = ($creds | Select-String "Target:.*copilot" -AllMatches).Matches | ForEach-Object {
-        $_.Value -replace '^\s*Target:\s*', '' -replace '\s+$', ''
-    }
-    if ($targets) {
-        foreach ($target in $targets) {
-            & cmdkey /delete:$target 2>&1 | Out-Null
-            Write-Host "    Removed credential: $target" -ForegroundColor Green
+    foreach ($line in $creds) {
+        if ($line -match 'Target:\s*\S*target=(.+)$') {
+            $target = $Matches[1].Trim()
+            if ($target -match 'copilot') {
+                & cmdkey /delete:$target 2>&1 | Out-Null
+                Write-Host "    Removed credential: $target" -ForegroundColor Green
+                $found = $true
+            }
         }
-    } else {
+    }
+    if (-not $found) {
         Write-Host "    No copilot entries in Credential Manager." -ForegroundColor Gray
     }
 
