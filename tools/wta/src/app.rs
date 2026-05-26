@@ -771,8 +771,6 @@ pub struct DispatchedCommand {
 
 pub enum AppEvent {
     Key(KeyEvent),
-    /// Mouse wheel scroll: delta<0 = scroll up, delta>0 = scroll down, row = terminal row of event
-    MouseScroll { delta: i32, row: u16 },
     Tick,
     Resize(u16, u16), // terminal resize (handled by ratatui)
     ConnectionStage(String),
@@ -2901,7 +2899,6 @@ impl App {
     fn event_name(event: &AppEvent) -> &'static str {
         match event {
             AppEvent::Key(_) => "key",
-            AppEvent::MouseScroll { .. } => "mouse_scroll",
             AppEvent::Tick => "tick",
             AppEvent::Resize(_, _) => "resize",
             AppEvent::ConnectionStage(_) => "connection_stage",
@@ -2957,27 +2954,6 @@ impl App {
     fn handle_event(&mut self, event: AppEvent) {
         match event {
             AppEvent::Key(key) => self.handle_key(key),
-            AppEvent::MouseScroll { delta, row } => {
-                // Recs panel sits just above the input. When the cursor is
-                // over it, the wheel drives `rec_scroll` (top-anchored:
-                // positive delta = scroll down = increase offset). Otherwise
-                // it drives `chat_scroll` (bottom-anchored: wheel up shows
-                // higher content = increase offset, so we negate delta).
-                let in_recs = self.current_tab().turn.recommendations().is_some() && {
-                    // 3 input + 1 nav hint row above the input.
-                    let recs_top = self
-                        .terminal_rows
-                        .saturating_sub(4 + self.rec_panel_height(self.main_area_width()));
-                    row >= recs_top
-                };
-                let d = delta as isize;
-                let tab = self.current_tab_mut();
-                if in_recs {
-                    tab.rec_scroll.by(d);
-                } else {
-                    tab.chat_scroll.by(-d);
-                }
-            }
             AppEvent::Tick => {
                 // Fan out across all tabs: a background tab with an in-flight
                 // prompt should keep its shimmer phase advancing so when the
@@ -4565,6 +4541,24 @@ impl App {
                     self.current_tab_mut().selected_button = default_btn;
                     self.scroll_rec_to_selected(self.main_area_width());
                 }
+            }
+            // Wheel-as-arrow scroll fallback: when the input is empty and no
+            // recommendation card is active, ↑/↓ scroll the chat transcript.
+            // The host terminal (WT, xterm, kitty, …) translates a mouse-wheel
+            // notch into ~3 arrow keystrokes when mouse capture is OFF and the
+            // app is in the alt-screen buffer, so by(1)/by(-1) per key matches
+            // one wheel notch ≈ 3 lines, in line with the previous explicit
+            // MouseScroll handler. Convention here mirrors PgUp/PgDn below:
+            // positive delta = scroll up (toward older content).
+            KeyCode::Up if self.current_tab().input.is_empty()
+                        && self.current_tab().turn.recommendations().is_none()
+                        && !self.command_popup_visible() => {
+                self.current_tab_mut().chat_scroll.by(1);
+            }
+            KeyCode::Down if self.current_tab().input.is_empty()
+                          && self.current_tab().turn.recommendations().is_none()
+                          && !self.command_popup_visible() => {
+                self.current_tab_mut().chat_scroll.by(-1);
             }
             KeyCode::Right | KeyCode::Tab
                 if self.current_tab().input.is_empty() && self.current_tab().turn.recommendations().is_some() =>
@@ -9487,5 +9481,110 @@ mod tests {
         assert_ne!(render, buggy,
             "text length 42 should wrap differently at width 50 vs 48 — \
              pick a different critical input");
+    }
+
+    // ─── Up/Down chat-scroll fallback ──────────────────────────────────
+    //
+    // After dropping crossterm mouse capture (so users can drag-select &
+    // copy text in the agent pane), wheel scrolling relies on the host
+    // terminal translating wheel notches into Up/Down arrow keystrokes
+    // while in the alt-screen buffer. The fallback in `handle_key`
+    // forwards those arrows to `chat_scroll.by(±1)` ONLY when none of
+    // the existing arrow-key consumers is active:
+    //   * input box is empty
+    //   * no recommendation card is shown
+    //   * slash-command popup is not visible
+    // These tests pin down each branch.
+
+    #[test]
+    fn up_arrow_scrolls_chat_when_input_empty_no_recs_no_popup() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut app = test_app();
+        // Fresh chat tab — Idle turn, empty input, no popup candidates.
+        assert!(app.current_tab().input.is_empty());
+        assert!(app.current_tab().turn.recommendations().is_none());
+        assert!(!app.command_popup_visible());
+        assert_eq!(app.current_tab().chat_scroll.offset, 0);
+
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(
+            app.current_tab().chat_scroll.offset, 1,
+            "↑ on empty input should scroll chat up by one line",
+        );
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(app.current_tab().chat_scroll.offset, 2);
+    }
+
+    #[test]
+    fn down_arrow_scrolls_chat_when_input_empty_no_recs_no_popup() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut app = test_app();
+        // Prime scroll offset so Down has somewhere to go (saturating sub
+        // would otherwise leave it at 0 and the assert couldn't tell the
+        // arm from a no-op).
+        app.current_tab_mut().chat_scroll.offset = 5;
+
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(
+            app.current_tab().chat_scroll.offset, 4,
+            "↓ on empty input should scroll chat down by one line",
+        );
+    }
+
+    #[test]
+    fn up_down_does_not_scroll_chat_when_input_non_empty() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut app = test_app();
+        // Non-empty input: arrows belong to the input-box editor, not
+        // the chat-scroll fallback.
+        app.current_tab_mut().input.push_str("hi");
+        app.current_tab_mut().cursor_pos = 2;
+        app.current_tab_mut().chat_scroll.offset = 3;
+
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(
+            app.current_tab().chat_scroll.offset, 3,
+            "non-empty input must NOT trigger the chat-scroll fallback",
+        );
+    }
+
+    #[test]
+    fn up_down_does_not_scroll_chat_when_command_popup_visible() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut app = test_app();
+        // Open the slash-command popup the same way real input would:
+        // type "/" and let refresh_command_popup populate candidates.
+        app.current_tab_mut().input.push('/');
+        app.current_tab_mut().cursor_pos = 1;
+        app.current_tab_mut().refresh_command_popup();
+        assert!(
+            app.command_popup_visible(),
+            "test prerequisite: command popup must be visible after typing '/'",
+        );
+        // Force-clear input WITHOUT calling refresh_command_popup so the
+        // candidates list stays populated while input becomes empty. This
+        // isolates the !command_popup_visible() guard as the one being
+        // tested — without this step, the input-empty guard would
+        // independently suppress the fallback and the assertion below
+        // could not tell which guard fired.
+        app.current_tab_mut().input.clear();
+        app.current_tab_mut().cursor_pos = 0;
+        assert!(
+            app.current_tab().input.is_empty(),
+            "test prerequisite: input must be empty so only the popup guard is exercised",
+        );
+        assert!(
+            app.command_popup_visible(),
+            "test prerequisite: popup must remain visible after clearing input",
+        );
+        app.current_tab_mut().chat_scroll.offset = 7;
+
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(
+            app.current_tab().chat_scroll.offset, 7,
+            "command popup visibility must suppress the chat-scroll fallback",
+        );
     }
 }

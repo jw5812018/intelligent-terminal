@@ -30,7 +30,6 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use crossterm::{
     cursor::SetCursorStyle,
-    event::{DisableMouseCapture, EnableMouseCapture},
     execute,
     style::Print,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -1426,7 +1425,14 @@ async fn run_acp_tui_mode(
 ) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    // NOTE: We intentionally do NOT call EnableMouseCapture. Without mouse
+    // tracking, the host terminal emulator (Windows Terminal, xterm, kitty,
+    // alacritty, wezterm) translates mouse-wheel events into Up/Down arrow
+    // keystrokes while we are in the alternate screen buffer. That gives us
+    // wheel-driven chat scrolling for free, and — crucially — leaves native
+    // click-drag text selection working so users can highlight and copy
+    // from the agent pane the way they would from any other terminal.
+    execute!(stdout, EnterAlternateScreen)?;
     execute!(stdout, Print("\x1b]11;#0c0c0c\x07"))?;
     // Steady block (DECSCUSR Ps=2): solid filled rectangle, no blink.
     // Survives the alt-screen swap; restored on exit below.
@@ -1444,7 +1450,6 @@ async fn run_acp_tui_mode(
         // OSC 111: reset bg to terminal default so the host shell isn't
         // left with our override.
         Print("\x1b]111\x07"),
-        DisableMouseCapture,
         LeaveAlternateScreen
     )?;
     terminal.show_cursor()?;
