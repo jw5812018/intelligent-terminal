@@ -202,3 +202,127 @@ For normal local WTA development, always produce the binary at `tools/wta/target
 | `crossterm` | 0.29 | Terminal I/O |
 | `clap` | 4 | CLI parsing |
 | `serde_json` | 1 | JSON handling |
+
+---
+
+## Session liveness + Enter routing (F2 view)
+
+The F2 "Session management" view (a.k.a. `/sessions`) lists every
+agent session that WTA knows about — both currently connected ("Live")
+and replayed from on-disk history ("Historical" / "Ended"). Enter and
+Shift+Enter on a row are routed through a closed-form state machine
+that splits the legacy one-dimensional `AgentStatus` into a
+**two-dimensional** model.
+
+### The two axes
+
+* **Activity** — `Idle | Working | Attention | Error`. Surfaces what
+  the connected agent is *doing* right now. Driven by ACP
+  `session/update` (`ToolCall`, `ToolCallUpdate`) on Class A
+  sessions, and by shell-integration hooks on Class B.
+
+* **Liveness** — `Live { pane_session_id } | Ended | Historical`.
+  Surfaces whether the session is currently attached to a process.
+  `Historical` = reconstructed from disk only; `Ended` = was Live
+  in this WTA process at some point, then closed.
+
+The legacy `AgentStatus` field is still the storage; `activity()`
+and `liveness()` derive from it (see `agent_sessions.rs`).
+
+### Class A vs Class B
+
+* **Class A** (`SessionOrigin::AgentPane`) — created by WTA on behalf
+  of an Intelligent Terminal agent pane (recorded in
+  `agent-pane-sessions.jsonl`). For these rows the natural Enter
+  target is the *same* agent pane; the natural Resume target is ACP
+  `session/load` so the conversation rehydrates in-place.
+
+* **Class B** (`SessionOrigin::Unknown`) — user ran the CLI directly
+  (`copilot`, `claude`, `gemini`) in a normal pane. The natural
+  Enter target is to focus that pane; the natural Resume target is
+  the CLI's own `--resume` flag (because the CLI owns the
+  conversation, not WTA).
+
+### Liveness data sources (composite)
+
+* **Class A** is composite: `liveness = Live` requires *both*
+  `alive_mirror.lookup(sid).is_some()` (the master-pushed registry
+  mirror via `intellterm.wta/session_added|removed` ext
+  notifications) *and* no local `PaneClosed` tombstone. Local
+  pane-close events trump the mirror so the row flips to `Ended`
+  immediately, even if master's `session_removed` notification
+  hasn't landed yet.
+
+* **Class B** is driven entirely by hooks + WT pane events
+  (`SessionStarted` / `SessionStopped` / `PaneClosed`).
+
+### Cold-startup race
+
+History scan and alive-mirror bootstrap arrive in either order. Both
+paths post `AppEvent::AliveJoinUpgrade`, which calls
+`AgentSessionRegistry::apply_alive_session_join` to upgrade
+**Historical** rows whose ACP session_id is in the alive mirror to
+`LivenessState::Live`. **Ended** rows (locally tombstoned by a
+`PaneClosed` event in this process) are **not** upgraded — local
+tombstones are authoritative, so a stale `session_added` broadcast
+arriving after `PaneClosed` cannot resurrect a row that has no
+demotion path back. Live rows are never demoted — preserves
+tool/attention state. See `agent_sessions.rs::apply_alive_session_join`.
+
+### Steady-state alive-mirror updates
+
+Every `intellterm.wta/session_added` notification from master also
+runs the incremental join synchronously in `app.rs` (calls
+`apply_alive_session_join([(sid, pane)])` before the async mirror
+upsert), so a Historical row matched by an arriving alive broadcast
+becomes Live in the same tick. Every `intellterm.wta/session_removed`
+notification calls `apply_master_session_ended(sid)` — the
+counterpart of `apply_alive_pane_snapshot` for a single explicit
+disappearance — which demotes a Live row to Ended, clears the pane
+binding, and prunes `known_alive_panes`. Without these two
+synchronous reducer calls, F2 rows would stay frozen at whatever
+state the last bootstrap snapshot saw.
+
+### Enter / Shift+Enter dispatch
+
+The pure-function core is `session_mgmt::decide_enter_action`. It
+takes a `RowSnapshot` (origin + liveness + cli + agent capabilities)
+and a `shift` boolean, and returns one of:
+
+* `Focus { pane_session_id }` — hand off to `wtcli focus-pane`
+  (which transparently restores a stashed agent pane after PR A).
+* `ResumeInAgentPane { key, cli }` — new tab + agent pane + ACP
+  `session/load(key)` (requires `loadSession` capability).
+* `ResumeCliFlag { key, cli }` — new tab + plain pane running
+  `<cli> --resume <key>` (requires the CLI to advertise a resume
+  flag — Codex doesn't).
+* `NotResumable { reason }` — surface a system message.
+
+The table (matching `session_mgmt.rs` and the plan):
+
+| Row state                  | Enter            | Shift+Enter      |
+| -------------------------- | ---------------- | ---------------- |
+| Any Live (Class A or B)    | Focus            | Focus (same)     |
+| Class A dead (Ended/Hist)  | ResumeInAgentPane| ResumeCliFlag    |
+| Class B dead (Ended/Hist)  | ResumeCliFlag    | ResumeInAgentPane|
+| Unknown CLI                | NotResumable     | NotResumable     |
+| Missing capability         | NotResumable     | NotResumable     |
+
+Shift on Live is intentionally identical to Enter — agents forbid two
+clients on one session, so any "force second copy" attempt would just
+error out. Shift is a safety alias there.
+
+### Dispatch boundary
+
+`App::activate_agent_session_with_shift` (`app.rs`) is the only
+caller of `decide_enter_action` from production code. It then
+dispatches into the existing helpers (`dispatch_focus_pane`,
+`dispatch_resume_in_agent_pane`, `dispatch_resume`) — those own
+all the side effects:
+
+* phantom-on-disk guard (`key_is_resumable_on_disk`),
+* optimistic `SessionEvent::ResumeDispatched` state flip,
+* `resume_in_new_agent_tab` event publish (for the WT side to open
+  a new tab + reconcile the agent pane),
+* on-failure `PaneClosed` rebroadcast (so a stuck Live row
+  transitions to Ended after `wtcli focus-pane` returns NotFound).

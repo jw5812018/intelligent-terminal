@@ -18,6 +18,12 @@ use std::sync::{Mutex, MutexGuard};
 /// race on the global `rust_i18n` state.
 static LOCALE_LOCK: Mutex<()> = Mutex::new(());
 
+/// Shared lock for tests that mutate process-wide environment variables.
+///
+/// Like the locale lock, env-var mutation is a global side effect — two
+/// tests that simultaneously `set_var(X, ...)` and `var(X)` will race.
+static ENV_LOCK: Mutex<()> = Mutex::new(());
+
 /// RAII guard returned by [`lock_locale`].
 ///
 /// While alive it (a) holds the crate-wide `LOCALE_LOCK`, serializing all
@@ -48,4 +54,18 @@ pub(crate) fn lock_locale() -> LocaleGuard {
         _lock: lock,
         previous: rust_i18n::locale().to_string(),
     }
+}
+
+/// RAII guard returned by [`lock_env`].
+///
+/// While alive it holds the crate-wide `ENV_LOCK`, serializing tests
+/// that mutate process-wide environment variables.
+pub(crate) struct EnvGuard {
+    _lock: MutexGuard<'static, ()>,
+}
+
+/// Acquire the shared env-var lock.
+pub(crate) fn lock_env() -> EnvGuard {
+    let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    EnvGuard { _lock: lock }
 }
