@@ -269,6 +269,11 @@ pub enum ChatMessage {
     /// codes, OSC sequences). Distinct from `Error` so we can theme it
     /// differently and skip autofix wiring.
     AgentEvent(String),
+    /// "Intelligent Terminal uses AI. Check for mistakes" disclaimer.
+    /// Pushed on every agent-pane startup,
+    /// no persistence gating — getting cleared by the next turn is fine,
+    /// the next pane startup re-pushes it.
+    Disclaimer,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -3907,7 +3912,13 @@ impl App {
                     self.mode = AppMode::Chat;
                     self.setup = None;
                 }
-                // Show welcome hint on first-ever connect (persisted in state.json)
+                // Show welcome hint on first-ever connect (persisted in state.json).
+                // The disclaimer card is pushed as a `ChatMessage::Disclaimer`
+                // on every agent-pane startup that lands on an empty chat (no
+                // prior completed turns and no other in-flight messages), so
+                // a session restored with history doesn't get a disclaimer
+                // injected on top. Once shown it's allowed to be cleared by
+                // a subsequent turn — the next startup re-pushes it.
                 if !welcome_shown_in_state() {
                     self.show_welcome_hint = true;
                 }
@@ -3920,6 +3931,19 @@ impl App {
                     .insert(session_id.clone(), bind_tab.clone());
                 let tab = self.tab_mut(&bind_tab);
                 tab.session_id = Some(session_id);
+                let has_real_content = !tab.completed_turns.is_empty()
+                    || tab
+                        .messages
+                        .iter()
+                        .any(|m| !matches!(m, ChatMessage::Disclaimer));
+                if !has_real_content
+                    && !tab
+                        .messages
+                        .iter()
+                        .any(|m| matches!(m, ChatMessage::Disclaimer))
+                {
+                    tab.messages.insert(0, ChatMessage::Disclaimer);
+                }
                 self.publish_agent_status();
             }
             AppEvent::SessionAttached {

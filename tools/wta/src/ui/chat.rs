@@ -32,8 +32,20 @@ pub fn estimated_block_height(app: &App, area_width: u16) -> u16 {
     let messages: usize = tab.messages.iter().map(|m| message_height(m, wrap_width)).sum();
     let turns: usize = tab.completed_turns.iter().map(|t| turn_height(t, wrap_width)).sum();
     let pending = pending_stream_height(tab, wrap_width);
+    // Welcome overlay sits above all chat content when `show_welcome_hint`
+    // is on; must be counted here or else any pushed message will scroll
+    // it off the top of the visible chat block. Always a single row —
+    // terminal min-width guarantees the localized title fits without
+    // wrapping.
+    let welcome = if app.show_welcome_hint
+        && app.state == crate::app::ConnectionState::Connected
+    {
+        1
+    } else {
+        0
+    };
 
-    (activity + messages + turns + pending).max(1).min(u16::MAX as usize) as u16
+    (activity + messages + turns + pending + welcome).max(1).min(u16::MAX as usize) as u16
 }
 
 fn pending_stream_height(tab: &crate::app::TabSession, wrap_width: usize) -> usize {
@@ -72,6 +84,9 @@ fn message_height(msg: &ChatMessage, wrap_width: usize) -> usize {
         ChatMessage::System(t) | ChatMessage::AgentEvent(t) => wrap_count(t, wrap_width) + 1,
         ChatMessage::ToolCall { .. } => 1,
         ChatMessage::Plan(entries) => 2 + entries.len(), // header + each entry + blank
+        // Disclaimer is a single dim row — terminal min-width guarantees the
+        // short text fits without wrapping, and no trailing blank is needed.
+        ChatMessage::Disclaimer => 1,
     }
 }
 
@@ -461,6 +476,15 @@ fn build_message_lines<'a>(
                 }
             }
             lines.push(Line::default());
+        }
+        ChatMessage::Disclaimer => {
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(
+                    t!("chat.welcome_disclaimer").into_owned(),
+                    Style::new().fg(Color::White).add_modifier(Modifier::BOLD),
+                ),
+            ]));
         }
     }
     lines
