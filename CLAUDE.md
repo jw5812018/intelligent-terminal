@@ -145,7 +145,8 @@ same bare path when the process has no package identity):
       master-pipe.txt               (helper↔master rendezvous)
 
   …\Packages\<PackageFamilyName>\LocalCache\Local\IntelligentTerminal\  <- LOCAL/cache root
-      logs\                         (all wta-*.log files)          intelligent_terminal_local_root()
+      logs\<pkgver>\                (ALL logs for that build — Rust wta-*.log,
+                                     C++ terminal-agent-pane.log, PS hook-trace.log)
       hook-bundle-staging\ …        (hook-installer staging)
 
 # Unpackaged (dev builds run straight out of the Cargo target dir, tests):
@@ -166,35 +167,77 @@ dev-sideload family (`IntelligentTerminal_rd9vj3e6a2mbr`) and the store family
 / `LocalCacheFolder` resolve to, so we construct them directly rather than
 pulling in the WinRT projection.
 
-**Other writers of the same dirs** (kept in lock-step with the Rust roots):
-- C++ `AgentPaneLog.h` (`_intelligentTerminalLogDir()`) — `wta-agent-pane.log`
-  and the bug-report-zip action, both → the LocalCache\Local `logs\`.
-- PowerShell hooks (`send-event.ps1`) — `hook-trace.log` → the dir handed down
-  by wta-master via the `WTA_HOOK_LOG_DIR` env var (PowerShell can't resolve the
-  package-private path itself).
+**All three writers share one per-version dir** `logs\<pkgver>\`, where
+`<pkgver>` is the **package version** (`GetCurrentPackageId`, e.g. `0.8.0.2`) —
+read identically at runtime by Rust (`logging::package_version`) and C++
+(`IntelligentTerminal::PackageVersionDir`), so no build-time version sync is
+needed:
+- Rust wta processes → `logging::log_dir()` (`logs\<pkgver>\wta-*.log`).
+- C++ `AgentPaneLog.h` → `IntelligentTerminal::LogDirVersioned()` →
+  `terminal-agent-pane.log` (renamed from the old `wta-agent-pane.log`).
+- PowerShell hooks (`send-event.ps1`) → `hook-trace.log`, via the
+  `WTA_HOOK_LOG_DIR` env var set to `LogDirVersioned()` (C++ ConptyConnection
+  for shell panes; `spawn.rs` for agent-pane CLIs).
+
+`IntelligentTerminal::LogDir()` stays the **root** (`…\logs`, no version) and is
+used only by the bug-report-zip action so it archives every version at once.
+Unpackaged (dev-from-cargo / tests) has no package identity → all writers fall
+back to the flat bare `…\logs\`.
 
 > Earlier builds wrote everything to the bare `%LOCALAPPDATA%\IntelligentTerminal`
 > regardless of identity (the `LOCALAPPDATA` env var is **not** redirected into
 > the sandbox on Win10/11). There is no migration — old data is left in place
 > and simply ignored.
 
-Log level is controlled by `WTA_LOG` env var (default: `info`; set `debug`
-for the noisy traces).
+**Log level** is controlled by the `WTA_LOG` (or `RUST_LOG`) env var. When
+unset, the default comes from the build: **debug builds default to `debug`,
+release builds default to `info`** (`logging::default_filter_directive`). Set
+`WTA_LOG=debug|trace` for the noisy traces, or `WTA_LOG=warn` to quiet a
+release build further.
+
+**Logging is initialized once** in `main()` immediately after arg parsing
+(`logging::init(&process_label(&cli))`), before locale/ETW setup, so even
+early-startup failures land on disk. The non-blocking appender's `WorkerGuard`
+lives in a global and is flushed via `logging::shutdown_flush()` on every exit
+path — including before each `std::process::exit` (which would otherwise skip
+the guard drop and lose buffered records). Every launch mode — including
+short-lived `wtcli`-style commands — now writes a log file (previously only 6
+entry points did).
+
+**Per-version storage + retention** (`logging::housekeeping`): each build's
+logs live in their own subdir, `logs\<pkgver>\` (the package version — see
+above). On every start, `prune_old_version_dirs` keeps **only the current
+version's dir** and deletes all other version dirs wholesale. The current
+version's dir is never a deletion target, so cleanup is **lock-free and
+concurrency-safe** (no process can delete a file another is writing). Within the
+current version's dir, per-PID helper logs older than **3 days** are pruned and
+`wta-cli.log` rotates daily keeping 3 days (`max_log_files`).
 
 ### Log files in the helper+master architecture
 
 ```
-wta-main_master.log    — wta-master process: agent CLI spawn, named pipe accept loop,
-                          per-helper routing, session_to_helper map updates,
-                          agent CLI exit detection
-wta-main_helper.log    — each wta-helper process: pipe connect, ACP initialize,
-                          session/new, prompts sent, agent responses received,
-                          TUI lifecycle
-wta-ensure-host.log    — WT-side background ensure-running diagnostics (kept from
-                          M3-M6 era; remains useful for SharedWta lifecycle)
-wta-acp-debug.log      — low-level ACP JSON-RPC wire trace
-wta-delegate.log       — `?<prompt>` delegation flow (separate from agent pane)
+wta-main_master.log        — wta-master process: agent CLI spawn, named pipe accept
+                              loop, per-helper routing, session_to_helper map updates,
+                              agent CLI exit detection, connection failures
+wta-main_helper-{pid}.log  — each wta-helper process (one file per PID, so concurrent
+                              per-tab helpers don't interleave): pipe connect, ACP
+                              initialize, session/new, prompts, agent responses,
+                              TUI lifecycle, connection failures
+wta-cli.log                — short-lived wtcli-style commands (list-*, capture-pane,
+                              listen, sessions, …); daily-rotated, 3-day retention
+wta-delegate.log           — `?<prompt>` delegation flow (separate from agent pane)
+wta-probe.log              — `probe-models` ACP model-list probe
+wta-install-hooks.log      — `hooks install` agent-hook bridge installation
+wta-ensure-host.log        — WT-side background ensure-running diagnostics (kept from
+                              M3-M6 era; remains useful for SharedWta lifecycle)
+wta-acp-debug.log          — low-level ACP JSON-RPC wire trace
 ```
+
+Two files in the per-version dir are **not** written by the Rust wta binary —
+`hook-trace.log` (PowerShell hooks) and `terminal-agent-pane.log` (C++ side);
+see **All three writers share one per-version dir** above. They live in the
+same `logs\<pkgver>\` and so are cleaned together with the Rust logs when that
+version's dir ages out.
 
 ### Tracking flows by `target` field
 
@@ -209,6 +252,7 @@ scenarios:
 | Trace one prompt end-to-end | grep `session_id="X"`, look for `step="helper→agent" op="prompt"` (sent) then `step="master→helper" op="session_notification"` (response chunks) |
 | Helper pipe lifecycle | `target=master helper_id=…` shows connect+exit |
 | Agent CLI failures | `target=agent_stderr` |
+| Connection failures (either side) | `"exiting with error"` — `target=master` in `wta-main_master.log`, `target=helper` in `wta-main_helper-{pid}.log`; plus inline `step="acp_initialize"` / `step="pipe_connect"` for the helper handshake |
 | Internal control routing | `target=internal_control` (legacy; mostly empty post-Z) |
 
 ### Example: end-to-end trace of one user prompt

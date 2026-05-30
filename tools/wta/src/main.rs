@@ -576,6 +576,17 @@ async fn main() -> Result<()> {
     //   2. sys_locale (GetUserPreferredUILanguages — automatic OS detection)
     //      — aligns with C++ side's MRT fallback when Language is empty
     let cli = Cli::parse();
+
+    // Initialize file logging exactly once, as the very first thing after
+    // arg parsing, so even early-startup failures (locale, ETW registration,
+    // legacy-flag dispatch) are captured. The global tracing subscriber can
+    // only be set once per process, so every mode routes through here — the
+    // per-mode handlers below no longer init their own. The appender's guard
+    // is held in a global and flushed via `logging::shutdown_flush()` on every
+    // exit path (see the calls below and before each `process::exit`).
+    logging::init(&process_label(&cli));
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), "=== wta starting ===");
+
     let locale = cli
         .language
         .clone()
@@ -591,14 +602,24 @@ async fn main() -> Result<()> {
 
     // Legacy flags first (backward compat)
     if cli.test_pipe {
-        return run_test_pipe().await;
+        let r = run_test_pipe().await;
+        if let Err(err) = &r {
+            tracing::error!(error = ?err, "wta exiting with error");
+        }
+        logging::shutdown_flush();
+        return r;
     }
     if cli.info {
-        return run_info_mode().await;
+        let r = run_info_mode().await;
+        if let Err(err) = &r {
+            tracing::error!(error = ?err, "wta exiting with error");
+        }
+        logging::shutdown_flush();
+        return r;
     }
     let json_mode = cli.json;
 
-    match cli.command {
+    let result = match cli.command {
         // Subcommand aliases for legacy modes
         Some(Command::Info) => run_info_mode().await,
         Some(Command::TestPipe) => run_test_pipe().await,
@@ -850,6 +871,48 @@ async fn main() -> Result<()> {
                 run_default_tui(cli).await
             }
         }
+    };
+
+    // Last-resort diagnostic: any propagated failure (named-pipe connect,
+    // agent spawn, ACP initialize, etc.) is otherwise only printed to stderr
+    // and lost. Log it to file so connection failures are always recoverable
+    // from the logs. Mode-specific context (target=master / target=helper)
+    // is added closer to the source in run_master_mode / the helper path.
+    if let Err(err) = &result {
+        tracing::error!(error = ?err, "wta exiting with error");
+    }
+    // Flush the file appender before returning (its guard lives in a global,
+    // not a local, so it is not dropped automatically on return).
+    logging::shutdown_flush();
+    result
+}
+
+/// Pick the log file label for this process from its launch mode. Drives the
+/// `wta-<label>.log` filename in [`logging::init`]. Singleton-service modes are
+/// selected by flags (`--master` / `--connect-master`); everything else by the
+/// subcommand. Short-lived `wtcli`-style commands all share `cli`.
+fn process_label(cli: &Cli) -> String {
+    if cli.master.is_some() {
+        return "main_master".to_string();
+    }
+    if cli.connect_master.is_some() {
+        // Per-PID so concurrent per-tab helpers don't interleave into one
+        // file (and can be reclaimed individually — see logging::housekeeping).
+        return format!("main_helper-{}", std::process::id());
+    }
+    // Legacy diagnostic flags are short-lived clients, not the TUI.
+    if cli.test_pipe || cli.info {
+        return "cli".to_string();
+    }
+    match &cli.command {
+        None => "main".to_string(),
+        Some(Command::Delegate { .. }) => "delegate".to_string(),
+        Some(Command::ProbeModels { .. }) => "probe".to_string(),
+        Some(Command::Hooks {
+            action: HooksAction::Install { .. },
+        }) => "install-hooks".to_string(),
+        // All other subcommands are short-lived wtcli-style clients.
+        Some(_) => "cli".to_string(),
     }
 }
 
@@ -857,10 +920,8 @@ async fn main() -> Result<()> {
 /// (the ACP client connection is `!Send`), serialize the result to
 /// stdout, force-exit. See exit notes below.
 async fn run_probe_models(agent: &str) -> Result<()> {
-    // Logging must go to file, not stderr — the Settings UI captures
-    // our stdout for the JSON payload, and stderr would be folded
-    // into the same pipe and pollute the parser.
-    let _guard = logging::init("probe");
+    // Logging is initialized in `main()` (file, not stderr — the Settings UI
+    // captures our stdout for the JSON payload and stderr would pollute it).
     tracing::info!("probe-models start: agent={}", agent);
 
     let local = tokio::task::LocalSet::new();
@@ -873,6 +934,8 @@ async fn run_probe_models(agent: &str) -> Result<()> {
             tracing::error!("probe-models failed: {:#}", e);
             eprintln!("probe-models failed: {:#}", e);
             let _ = std::io::Write::flush(&mut std::io::stderr());
+            // Flush the file appender — process::exit skips the guard drop.
+            logging::shutdown_flush();
             // See exit rationale below.
             std::process::exit(1);
         }
@@ -894,15 +957,16 @@ async fn run_probe_models(agent: &str) -> Result<()> {
     // handle, exit now. Orphan grandchildren self-exit shortly after
     // when they notice their pipes are broken.
     let _ = std::io::Write::flush(&mut std::io::stdout());
+    // Flush the file appender — process::exit skips the guard drop.
+    logging::shutdown_flush();
     std::process::exit(0);
 }
 
 // ─── Hooks subcommand handlers ──────────────────────────────────────────────
 
 fn run_hooks_install(cli: HooksCliFilter) -> Result<()> {
-    // Initialize logging so the install attempt is observable in
+    // Logging is initialized in `main()`; the install attempt is observable in
     // %LOCALAPPDATA%\IntelligentTerminal\logs\wta-install-hooks.log.
-    let _guard = logging::init("install-hooks");
     agent_hooks_installer::ensure_installed_scoped(cli.into_scope());
     println!("{}", t!("hooks.install_attempted"));
     Ok(())
@@ -1522,8 +1586,9 @@ async fn run_delegate(
     delegate_model: Option<&str>,
     cwd: Option<&str>,
 ) -> Result<()> {
-    let _guard = logging::init("delegate");
-    tracing::info!(prompt = ?prompt, agent = agent_cmd, cwd, "run_delegate started");
+    // Log the prompt length, not the text — the prompt is user content.
+    tracing::info!(prompt_chars = prompt.map(|p| p.chars().count()), agent = agent_cmd, cwd, "run_delegate started");
+    tracing::trace!(target: "delegate.content", prompt = ?prompt, "run_delegate prompt");
 
     let (debug_tx, _) = tokio::sync::mpsc::unbounded_channel::<app::DebugMessage>();
     let channel = match connect_to_wt_protocol(debug_tx).await {
@@ -1621,7 +1686,10 @@ async fn delegate_with_context(
         _ => crate::coordinator::build_delegate_interactive_commandline(runtime)?,
     };
 
-    tracing::debug!(commandline, cwd, "delegate_with_context: launching");
+    // The commandline bakes in the user prompt (`-i "<prompt>"`); keep it out
+    // of the debug log and only emit it at trace.
+    tracing::debug!(cwd, "delegate_with_context: launching");
+    tracing::trace!(target: "delegate.content", commandline, cwd, "delegate_with_context commandline");
 
     shell_mgr
         .wt_create_tab(Some(&commandline), cwd, None)
@@ -1633,7 +1701,6 @@ async fn delegate_with_context(
 // ─── Default ACP TUI mode ───────────────────────────────────────────────────
 
 async fn run_default_tui(cli: Cli) -> Result<()> {
-    let _guard = logging::init("main");
     tracing::info!("=== run_default_tui started ===");
 
     // Debug channel for TUI debug panel (WT protocol traffic viewer)
@@ -1687,7 +1754,6 @@ async fn run_default_tui(cli: Cli) -> Result<()> {
 /// "spawn agent CLI" path: the helper attaches to wta-master over the
 /// supplied named pipe and forwards ACP traffic over it.
 pub(crate) async fn run_default_tui_over_pipe(cli: Cli, pipe_name: String) -> Result<()> {
-    let _guard = logging::init("main_helper");
     tracing::info!(target: "helper", pipe = %pipe_name, "=== wta-helper starting (TUI) ===");
 
     // Debug channel — same wiring as run_default_tui.
@@ -1719,6 +1785,10 @@ pub(crate) async fn run_default_tui_over_pipe(cli: Cli, pipe_name: String) -> Re
         None
     };
 
+    // Connection failures to wta-master (pipe connect give-up, ACP initialize
+    // timeout/failure) are logged at their source (target=helper) and again in
+    // `run_acp_tui_mode`'s exit branch, which `process::exit`s rather than
+    // returning Err — so there's no point wrapping the result here.
     run_acp_tui_mode(
         cli,
         shell_mgr,
@@ -1824,7 +1894,15 @@ async fn run_acp_tui_mode(
     terminal.show_cursor()?;
 
     if let Err(e) = result {
+        // This is the real exit point for a TUI/helper failure (connection
+        // failures to wta-master propagate up to here). `process::exit` below
+        // bypasses both `main()`'s catch-all and any caller's wrapper, so log
+        // it here before exiting — it lands in this process's log file
+        // (wta-main_helper-{pid}.log in helper mode).
+        tracing::error!(error = ?e, "wta TUI exiting with error");
         eprintln!("Error: {e:?}");
+        // Flush the file appender — process::exit skips the guard drop.
+        logging::shutdown_flush();
         std::process::exit(1);
     }
     Ok(())
@@ -2025,12 +2103,16 @@ async fn run_acp_app(
                 let wt_event_tx = event_tx.clone();
                 tokio::task::spawn_local(async move {
                     while let Some(event_json) = wt_rx.recv().await {
-                        tracing::debug!(event = %event_json, "wt_event_rx: received event");
                         let method = event_json
                             .get("method")
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string();
+                        // The full event envelope carries `vt_sequence` (raw
+                        // terminal output/scrollback) — keep it out of debug;
+                        // log only the method there, full JSON at trace.
+                        tracing::debug!(method = %method, "wt_event_rx: received event");
+                        tracing::trace!(target: "wt_event.content", event = %event_json, "wt_event_rx: full event");
 
                         let params = event_json
                             .get("params")
