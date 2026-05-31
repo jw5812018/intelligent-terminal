@@ -11,9 +11,12 @@
 #include "../inc/ShellIntegration.h"
 #include "../inc/RtlHelper.h"
 
+#include <winrt/Windows.UI.Xaml.Documents.h>
+
 using namespace winrt::Windows::Foundation;
 using namespace winrt::Windows::UI::Xaml;
 using namespace winrt::Windows::UI::Xaml::Controls;
+using namespace winrt::Windows::UI::Xaml::Documents;
 namespace Automation = winrt::Windows::UI::Xaml::Automation;
 
 namespace winrt::TerminalApp::implementation
@@ -163,6 +166,25 @@ namespace winrt::TerminalApp::implementation
         WelcomeSubtitleLink().Text(RS_(L"FreOverlay_WelcomeSubtitleLink"));
         SettingsSubtitlePrefix().Text(RS_(L"FreOverlay_SettingsSubtitlePrefix"));
         SettingsSubtitleLink().Text(RS_(L"FreOverlay_SettingsSubtitleLink"));
+
+        // Split the description on "ACP" (locked token) so it can be rendered as an inline Hyperlink.
+        {
+            const auto descStr = RS_(L"FreOverlay_AgentDescription/Text");
+            const std::wstring_view desc{ descStr };
+            constexpr std::wstring_view token{ L"ACP" };
+            const auto pos = desc.find(token);
+            if (pos != std::wstring_view::npos)
+            {
+                AgentDescriptionBefore().Text(winrt::hstring{ desc.substr(0, pos) });
+                AgentDescriptionAcpToken().Text(winrt::hstring{ token });
+                AgentDescriptionAfter().Text(winrt::hstring{ desc.substr(pos + token.size()) });
+            }
+            else
+            {
+                // Fallback (shouldn't happen — ACP is locked): degrade to plain text.
+                AgentDescriptionBefore().Text(winrt::hstring{ desc });
+            }
+        }
 
         // Set toggle On/Off labels
         AutoDetectToggle().OnContent(winrt::box_value(RS_(L"FreOverlay_ToggleOn")));

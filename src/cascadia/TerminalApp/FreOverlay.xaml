@@ -216,9 +216,17 @@
                                     <TextBlock x:Uid="FreOverlay_AgentLabel"
                                                FontSize="14" FontWeight="SemiBold"
                                                Foreground="White" />
-                                    <TextBlock x:Uid="FreOverlay_AgentDescription"
+                                    <!--  Run.Text values populated from code-behind by splitting on "ACP".  -->
+                                    <TextBlock x:Name="AgentDescriptionText"
                                                FontSize="12" Foreground="#99FFFFFF"
-                                               TextWrapping="Wrap" />
+                                               TextWrapping="Wrap">
+                                        <Run x:Name="AgentDescriptionBefore" />
+                                        <Hyperlink NavigateUri="https://aka.ms/intelligent-terminal-acpref"
+                                                   Foreground="#FF99EBFF">
+                                            <Run x:Name="AgentDescriptionAcpToken" />
+                                        </Hyperlink>
+                                        <Run x:Name="AgentDescriptionAfter" />
+                                    </TextBlock>
                                     <TextBlock x:Uid="FreOverlay_AgentInstallHint"
                                                x:Name="AgentInstallHint"
                                                FontSize="12" Foreground="#99FFFFFF"

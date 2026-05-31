@@ -67,10 +67,42 @@
                        Style="{StaticResource TextBlockSubHeaderStyle}"
                        Margin="0,0,0,4" />
 
-            <!--  Agent (ACP CLI)  -->
-            <local:SettingContainer x:Name="AcpAgent"
-                                    x:Uid="AIAgents_AcpAgent">
-                <StackPanel>
+            <!--  Agent (ACP CLI) — hand-built Grid mimicking the NonExpanderGrid chrome of
+                  local:SettingContainer, so the description TextBlock can host an inline Hyperlink.  -->
+            <Grid x:Name="AcpAgent"
+                  Background="{ThemeResource ExpanderHeaderBackground}"
+                  BorderThickness="{ThemeResource ExpanderHeaderBorderThickness}"
+                  BorderBrush="{ThemeResource ExpanderHeaderBorderBrush}"
+                  CornerRadius="{ThemeResource ControlCornerRadius}"
+                  MinHeight="64"
+                  MinWidth="{ThemeResource FlyoutThemeMinWidth}"
+                  MaxWidth="1000"
+                  HorizontalAlignment="Stretch"
+                  Padding="16,0,8,0"
+                  Margin="0,4,0,0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <StackPanel Grid.Column="0"
+                            VerticalAlignment="Center"
+                            Padding="0,12,0,12">
+                    <TextBlock x:Name="AcpAgentHeaderText"
+                               Style="{StaticResource SettingsPageItemHeaderStyle}" />
+                    <!--  Run.Text values populated from code-behind by splitting on "ACP".  -->
+                    <TextBlock x:Name="AcpAgentDescriptionText"
+                               Style="{StaticResource SettingsPageItemDescriptionStyle}">
+                        <Run x:Name="AcpAgentDescriptionBefore" />
+                        <Hyperlink NavigateUri="https://aka.ms/intelligent-terminal-acpref">
+                            <Run x:Name="AcpAgentDescriptionAcpToken" />
+                        </Hyperlink>
+                        <Run x:Name="AcpAgentDescriptionAfter" />
+                    </TextBlock>
+                </StackPanel>
+                <StackPanel Grid.Column="1"
+                            HorizontalAlignment="Right"
+                            VerticalAlignment="Center"
+                            Margin="0,12,0,12">
                     <ComboBox AutomationProperties.AccessibilityView="Content"
                               ItemTemplate="{StaticResource AgentEntryTemplate}"
                               ItemsSource="{x:Bind ViewModel.AcpAgentList, Mode=OneWay}"
@@ -109,7 +141,7 @@
                         </StackPanel>
                     </StackPanel>
                 </StackPanel>
-            </local:SettingContainer>
+            </Grid>
 
             <!--  Model (only for built-in agents)  -->
             <local:SettingContainer x:Name="AcpModel"
@@ -355,7 +387,11 @@
             <!--  Agent (delegate / on-demand CLI)  -->
             <local:SettingContainer x:Name="DelegateAgent"
                                     x:Uid="AIAgents_DelegateAgent">
-                <StackPanel>
+                <!--  Vertical Margin — same rationale as the AcpAgent
+                      container above: when a custom delegate agent is
+                      selected the content grows past the SettingContainer's
+                      MinHeight=64 and would otherwise hug the card edges.  -->
+                <StackPanel Margin="0,12,0,12">
                     <ComboBox AutomationProperties.AccessibilityView="Content"
                               ItemTemplate="{StaticResource AgentEntryTemplate}"
                               ItemsSource="{x:Bind ViewModel.DelegateAgentList, Mode=OneWay}"
