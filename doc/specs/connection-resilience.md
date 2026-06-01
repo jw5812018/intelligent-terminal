@@ -7,7 +7,7 @@ is the running TODO/known-gaps list for connection resilience, written alongside
 the first MVP (PR #141).
 
 See also `Multi-window-agent-pane.md` for the helper+master architecture and the
-top-level `CLAUDE.md` for the runtime/log layout.
+top-level `AGENTS.md` for the runtime/log layout.
 
 ---
 
