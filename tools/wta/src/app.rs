@@ -273,6 +273,29 @@ impl PreflightResult {
 /// - `FirstRun` / `SwitchAgent`: one `SelectAgent` per known agent.
 /// - `AgentMissing` / `AgentError`: diagnostic options for the current agent
 ///   (reinstall, install manually, sign in, switch) depending on what failed.
+/// True for the auth failures a post-login reconnect can hit when the shared
+/// master CLI was spawned with a stale token: the plain `AuthRequired`, AND the
+/// `HandshakeFailed { stage: NewSession }` that the pipe client wraps a
+/// still-`AuthRequired` `new_session` into after a *successful* `authenticate`
+/// (the Copilot CLI does not refresh its in-process auth on `authenticate`, so
+/// only respawning it recovers — see `run_acp_client_over_pipe`).
+///
+/// Deliberately does NOT match `HandshakeFailed { stage: Authenticate }`: that
+/// is a genuine `authenticate` RPC rejection or timeout (the credentials were
+/// not accepted / the agent hung), which a master restart would not fix — it
+/// routes to the sign-in screen via the normal `AgentError` path instead.
+fn is_post_login_auth_failure(failure: &crate::protocol::acp::failure::AgentFailure) -> bool {
+    use crate::protocol::acp::failure::{AgentFailure, HandshakeStage};
+    matches!(
+        failure,
+        AgentFailure::AuthRequired { .. }
+            | AgentFailure::HandshakeFailed {
+                stage: HandshakeStage::NewSession,
+                ..
+            }
+    )
+}
+
 pub fn build_setup_options(
     reason: &SetupReason,
     current_agent_status: Option<&crate::agent_check::AgentStatus>,
@@ -1266,6 +1289,26 @@ pub enum AppEvent {
         agent_id: String,
         success: bool,
     },
+    /// Post-login auth recovery: a genuine post-login reconnect (helper/pipe
+    /// mode) for an External-auth agent STILL failed auth, which means the
+    /// shared long-lived master CLI was spawned with a stale token and
+    /// `authenticate` can't refresh it. The handler shows a transient
+    /// "Reconnecting…" and fires `restart_agent_stack` so a fresh master
+    /// (which re-reads the now-valid on-disk token) takes over.
+    PostLoginAuthRecovery {
+        failure: crate::protocol::acp::failure::AgentFailure,
+        tab_id: Option<String>,
+        agent_id: String,
+    },
+    /// Dead-man fallback for `PostLoginAuthRecovery`: a successful restart
+    /// tears this helper down before this fires; if it DOES fire (restart
+    /// dropped/slow), surface the sign-in screen instead of stranding the user
+    /// on a perpetual "Reconnecting…". `generation` pins this to the specific
+    /// recovery that armed it, so a stale timer can't act on a later state.
+    AuthRecoveryTimedOut {
+        agent_id: String,
+        generation: u64,
+    },
     /// Result of `preflight::check_agent` run by main.rs before the TUI
     /// loop starts. If `all_passed()` is false the App switches into
     /// `AppMode::Setup` so the user can install / authenticate the CLI.
@@ -1875,6 +1918,20 @@ pub struct App {
     event_tx: Option<mpsc::UnboundedSender<AppEvent>>,
     /// Set after login completes — consumed by main loop to spawn ACP client.
     pub pending_acp_start: bool,
+    /// Set by LoginComplete success — consumed once by try_start_acp to pass
+    /// `post_login_reconnect=true` to the pipe-mode ACP client. This ensures
+    /// the authenticate RPC is only sent on genuine post-login reconnects, not
+    /// on agent-switch / retry / install-complete reconnects that also go
+    /// through try_start_acp.
+    needs_post_login_authenticate: bool,
+    /// Monotonic id for the in-flight post-login auth recovery. Bumped each
+    /// time `PostLoginAuthRecovery` arms its 8s dead-man timer, and bumped
+    /// again on a successful `AgentConnected`. The `AuthRecoveryTimedOut`
+    /// fallback only fires if its captured generation still matches — so a
+    /// stale timer from an earlier recovery (or one whose connection already
+    /// succeeded) cannot force the sign-in screen onto a later, unrelated
+    /// `Connecting` state.
+    auth_recovery_generation: u64,
     /// Agent ID selected by user (FRE/preflight) — sent to C++ once connected.
     pending_agent_selection: Option<String>,
     /// Show first-run welcome hint until user sends first message.
@@ -2168,6 +2225,8 @@ impl App {
             auth: None,
             event_tx: None,
             pending_acp_start: false,
+            needs_post_login_authenticate: false,
+            auth_recovery_generation: 0,
             pending_agent_selection: None,
             show_welcome_hint: false,
             deferred_acp: None,
@@ -2300,7 +2359,9 @@ impl App {
             return;
         }
         self.pending_acp_start = false;
-        tracing::info!(target: "acp", has_event_tx = self.event_tx.is_some(), has_deferred = self.deferred_acp.is_some(), "try_start_acp triggered");
+        let post_login_auth = self.needs_post_login_authenticate;
+        self.needs_post_login_authenticate = false;
+        tracing::info!(target: "acp", has_event_tx = self.event_tx.is_some(), has_deferred = self.deferred_acp.is_some(), post_login_auth, "try_start_acp triggered");
 
         if let (Some(ref tx), Some(ref mut params)) = (&self.event_tx, &mut self.deferred_acp) {
             // If channels were consumed by a previous (failed) attempt, create fresh ones.
@@ -2374,6 +2435,12 @@ impl App {
                         pipe = %pipe_name,
                         "try_start_acp: reconnecting via master pipe"
                     );
+                    // Captured for post-login auth recovery: who failed (agent)
+                    // and which tab, so a still-auth-failing post-login
+                    // reconnect can request a fresh master targeting that tab.
+                    // Taken before `owner_tab_opt` is moved into the client.
+                    let recovery_tab_id = owner_tab_opt.clone();
+                    let recovery_agent_id = self.current_agent_id.clone();
                     let event_tx_for_pipe = event_tx.clone();
                     tokio::task::spawn_local(async move {
                         if let Err(e) =
@@ -2394,6 +2461,7 @@ impl App {
                                 master_ext_rx,
                                 shell_mgr,
                                 wt_connected,
+                                post_login_auth, // only true on genuine LoginComplete reconnects
                             )
                             .await
                         {
@@ -2406,13 +2474,43 @@ impl App {
                                 &e,
                                 crate::protocol::acp::failure::HandshakeStage::Initialize,
                             );
-                            let _ = event_tx_for_pipe.send(AppEvent::AgentError {
-                                session_id: None,
-                                failure,
-                                message: format!(
-                                    "helper ACP transport failed on reconnect: {e:#}"
-                                ),
-                            });
+                            // A post-login reconnect for an External-auth agent
+                            // that STILL fails auth means the long-lived shared
+                            // master CLI is poisoned and `authenticate` won't
+                            // refresh it. Request a fresh master (auth recovery)
+                            // instead of looping back to the sign-in screen.
+                            // Match BOTH the plain AuthRequired and the post-
+                            // login HandshakeFailed{NewSession} the client
+                            // wraps a still-AuthRequired new_session into.
+                            let is_external = matches!(
+                                crate::agent_registry::lookup_profile_by_id(&recovery_agent_id)
+                                    .acp_auth_flow,
+                                crate::agent_registry::AcpAuthFlow::External
+                            );
+                            if post_login_auth
+                                && is_external
+                                && is_post_login_auth_failure(&failure)
+                            {
+                                tracing::warn!(
+                                    target: "auth_recovery",
+                                    agent_id = %recovery_agent_id,
+                                    tab_id = ?recovery_tab_id,
+                                    "post-login reconnect still auth-failing on shared master CLI; requesting auth recovery"
+                                );
+                                let _ = event_tx_for_pipe.send(AppEvent::PostLoginAuthRecovery {
+                                    failure,
+                                    tab_id: recovery_tab_id.clone(),
+                                    agent_id: recovery_agent_id.clone(),
+                                });
+                            } else {
+                                let _ = event_tx_for_pipe.send(AppEvent::AgentError {
+                                    session_id: None,
+                                    failure,
+                                    message: format!(
+                                        "helper ACP transport failed on reconnect: {e:#}"
+                                    ),
+                                });
+                            }
                         }
                     });
                 } else {
@@ -4332,6 +4430,8 @@ impl App {
             AppEvent::AgentInstallComplete => "agent_install_complete",
             AppEvent::LoginProgress { .. } => "login_progress",
             AppEvent::LoginComplete { .. } => "login_complete",
+            AppEvent::PostLoginAuthRecovery { .. } => "post_login_auth_recovery",
+            AppEvent::AuthRecoveryTimedOut { .. } => "auth_recovery_timed_out",
             AppEvent::PreflightComplete(_) => "preflight_complete",
             AppEvent::AgentSessionEvent(_) => "agent_session_event",
             AppEvent::AliveSnapshotLoaded(_) => "alive_snapshot_loaded",
@@ -4362,6 +4462,60 @@ impl App {
             !tab.permission.is_empty(),
             tab.timing_note.is_some()
         )
+    }
+
+    /// Render the sign-in / setup screen for `agent_id` (the
+    /// `SetupReason::AgentError` flavor). Used by the `AuthRecoveryTimedOut`
+    /// dead-man fallback so a dropped/slow auth-recovery restart still lands
+    /// the user on an actionable sign-in screen (mirrors the `AgentError`
+    /// auth-fallback path).
+    fn show_signin_setup_screen(&mut self, agent_id: String) {
+        tracing::info!("show_signin_setup_screen: agent_id={}", agent_id);
+        let profile = crate::agent_registry::lookup_profile(&agent_id);
+        let agent_status = crate::agent_check::check_agent(profile.id);
+        let all_agents = crate::agent_check::check_all_agents();
+        let reason = SetupReason::AgentError;
+        let options = build_setup_options(&reason, Some(&agent_status), &all_agents);
+        self.mode = AppMode::Setup;
+        self.state = ConnectionState::Disconnected;
+        self.auth = None;
+        self.setup = Some(SetupState {
+            reason,
+            selected_index: 0,
+            preflight: PreflightResult {
+                agent_id: profile.id.to_string(),
+                display_name: profile.display_name.to_string(),
+                // Reflect the CLI's real presence (we just computed
+                // `agent_status`) instead of hard-coding "found" — on the
+                // dead-man fallback the CLI may genuinely be the problem.
+                cli_status: if agent_status.cli_found {
+                    CheckStatus::Passed
+                } else {
+                    CheckStatus::Failed(t!("agent.status.not_found").into_owned())
+                },
+                cli_path: agent_status.cli_path.clone(),
+                auth_status: CheckStatus::Failed(
+                    t!("system.authentication_failed").into_owned(),
+                ),
+                install_hint: profile.install_hint.to_string(),
+                install_url: String::new(),
+                auth_hint: profile.auth_hint.to_string(),
+            },
+            install_in_progress: false,
+            install_log: Vec::new(),
+            install_error: None,
+            options,
+            title: t!("setup.title.sign_in").into_owned(),
+            subtitle: if profile.id == "copilot" {
+                t!("setup.subtitle.copilot_auth", agent = profile.display_name)
+                    .into_owned()
+            } else {
+                t!("setup.subtitle.agent_auth", agent = profile.display_name)
+                    .into_owned()
+            },
+        });
+        let tab = self.current_tab_mut();
+        tab.messages.retain(|m| !matches!(m, ChatMessage::Error(_)));
     }
 
     fn handle_event(&mut self, event: AppEvent) {
@@ -4442,6 +4596,10 @@ impl App {
                 self.current_model_id = current_model_id.clone();
                 self.agent_supports_load_session = load_session_supported;
                 self.state = ConnectionState::Connected;
+                // A successful connect resolves any in-flight auth recovery:
+                // bump the generation so a still-pending dead-man timer becomes
+                // stale and can't later force the sign-in screen.
+                self.auth_recovery_generation = self.auth_recovery_generation.wrapping_add(1);
                 // A live connection cancels the degraded latch (e.g. the
                 // post-sign-in reconnect that goes back through master).
                 self.transport_lost = false;
@@ -4698,6 +4856,109 @@ impl App {
                     if !is_duplicate {
                         tab.messages.push(ChatMessage::Error(message));
                     }
+                }
+            }
+            AppEvent::PostLoginAuthRecovery {
+                failure,
+                tab_id,
+                agent_id,
+            } => {
+                tracing::warn!(
+                    target: "auth_recovery",
+                    failure_class = failure.class(),
+                    tab_id = ?tab_id,
+                    agent_id = %agent_id,
+                    "post-login auth recovery: shared master CLI still AuthRequired \
+                     after a successful login; reconnecting via a fresh master \
+                     (restart_agent_stack)"
+                );
+                let resolved = if !agent_id.is_empty() {
+                    agent_id.clone()
+                } else {
+                    "copilot".to_string()
+                };
+                // Pin this recovery to a fresh generation so a stale dead-man
+                // timer (from an earlier recovery, or one whose reconnect later
+                // succeeds — see AgentConnected) can't fire onto an unrelated
+                // Connecting state.
+                self.auth_recovery_generation = self.auth_recovery_generation.wrapping_add(1);
+                let recovery_generation = self.auth_recovery_generation;
+                // (i) Transient "Reconnecting…" — NOT the sign-in screen. The
+                // restart below tears this pane down + respawns it, so the
+                // common (successful) case never flashes the setup screen
+                // between login and the fresh pane connecting. Only a dropped/
+                // slow restart leaves us alive long enough for the
+                // `AuthRecoveryTimedOut` fallback path to surface the sign-in screen.
+                self.mode = AppMode::Chat;
+                self.setup = None;
+                self.auth = None;
+                self.state =
+                    ConnectionState::Connecting(t!("connection.reconnecting").into_owned());
+                {
+                    let tab = self.current_tab_mut();
+                    tab.messages.retain(|m| !matches!(m, ChatMessage::Error(_)));
+                }
+                // (ii) Request a fresh master CLI. The long-lived shared CLI
+                // cached its unauthenticated state at spawn and `authenticate`
+                // does not refresh it; only a respawn (which re-reads the now
+                // valid on-disk credential) recovers. Reuse the tested
+                // `/restart` machinery; `tab_id` lets C++ reopen the failing
+                // tab rather than the active one.
+                let evt = serde_json::json!({
+                    "type": "event",
+                    "method": "restart_agent_stack",
+                    "params": { "reason": "auth_recovery", "tab_id": tab_id },
+                });
+                send_wt_protocol_event(evt.to_string());
+                // (iii) Dead-man fallback: if the restart actually respawned
+                // this pane, this helper process is gone before the timer
+                // fires. If it survives (dropped/slow restart), surface the
+                // sign-in screen so the user isn't stranded on "Reconnecting…".
+                // Guarded on a live async runtime so unit tests (no LocalSet)
+                // don't panic in `spawn_local`.
+                if let Some(ref tx) = self.event_tx {
+                    if tokio::runtime::Handle::try_current().is_ok() {
+                        let tx = tx.clone();
+                        tokio::task::spawn_local(async move {
+                            tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+                            let _ = tx.send(AppEvent::AuthRecoveryTimedOut {
+                                agent_id: resolved,
+                                generation: recovery_generation,
+                            });
+                        });
+                    }
+                }
+            }
+            AppEvent::AuthRecoveryTimedOut {
+                agent_id,
+                generation,
+            } => {
+                // Only reached when the auth-recovery restart did NOT tear this
+                // pane down within the window (dropped/slow delivery) — a
+                // successful restart kills this helper process first. Surface
+                // the sign-in fallback so the user can retry instead of being
+                // stranded on a perpetual "Reconnecting…".
+                //
+                // The generation guard drops a stale timer: if a newer recovery
+                // started, or the reconnect already succeeded (AgentConnected
+                // bumps the generation), this no longer matches the current
+                // recovery and must not force the sign-in screen.
+                if generation == self.auth_recovery_generation
+                    && self.mode != AppMode::Setup
+                    && matches!(self.state, ConnectionState::Connecting(_))
+                {
+                    tracing::warn!(
+                        target: "auth_recovery",
+                        agent_id = %agent_id,
+                        "auth-recovery restart did not take effect within the window; \
+                         falling back to the sign-in screen"
+                    );
+                    let resolved = if !agent_id.is_empty() {
+                        agent_id
+                    } else {
+                        "copilot".to_string()
+                    };
+                    self.show_signin_setup_screen(resolved);
                 }
             }
             AppEvent::AgentSoftStop { session_id, reason } => {
@@ -6056,6 +6317,7 @@ impl App {
                         });
                     }
                     self.pending_acp_start = true;
+                    self.needs_post_login_authenticate = true;
                     self.auth = None;
                 } else {
                     // Login failed — show auth screen again
@@ -12649,6 +12911,80 @@ mod tests {
             .filter(|m| matches!(m, ChatMessage::Error(s) if *s == lost))
             .count();
         assert_eq!(n, 1, "identical connection.lost must not duplicate");
+    }
+
+    /// `is_post_login_auth_failure` must catch BOTH the plain `AuthRequired`
+    /// and the `HandshakeFailed { NewSession }` the pipe client wraps a
+    /// still-AuthRequired post-login `new_session` into — `is_auth()` alone
+    /// would miss the latter and the auth recovery would never fire. It must
+    /// NOT match `HandshakeFailed { Authenticate }` (a genuine authenticate
+    /// RPC rejection/timeout) — that routes to sign-in, not a master restart.
+    #[test]
+    fn post_login_auth_failure_matches_auth_required_and_handshake_new_session() {
+        use crate::protocol::acp::failure::{AgentFailure, HandshakeStage};
+        assert!(is_post_login_auth_failure(&AgentFailure::AuthRequired {
+            message: "auth".to_string()
+        }));
+        assert!(is_post_login_auth_failure(&AgentFailure::HandshakeFailed {
+            stage: HandshakeStage::NewSession,
+            detail: "still auth after authenticate".to_string()
+        }));
+        // An authenticate-RPC rejection/timeout must NOT trigger auth recovery
+        // (a master restart can't fix bad credentials) — it routes to sign-in.
+        assert!(!is_post_login_auth_failure(&AgentFailure::HandshakeFailed {
+            stage: HandshakeStage::Authenticate,
+            detail: "authenticate rejected/timed out".to_string()
+        }));
+        // A non-auth handshake stage must NOT trigger auth recovery.
+        assert!(!is_post_login_auth_failure(&AgentFailure::HandshakeFailed {
+            stage: HandshakeStage::Initialize,
+            detail: "boom".to_string()
+        }));
+    }
+
+    /// `PostLoginAuthRecovery` shows a transient "Reconnecting…" (NOT the
+    /// sign-in screen, so there is no flash), and the `AuthRecoveryTimedOut`
+    /// dead-man only falls back to the sign-in screen if the restart never
+    /// took effect (this helper survived the window).
+    #[test]
+    fn post_login_auth_recovery_shows_reconnecting_then_signin_fallback() {
+        let mut app = test_app();
+        app.handle_event(AppEvent::PostLoginAuthRecovery {
+            failure: crate::protocol::acp::failure::AgentFailure::AuthRequired {
+                message: "auth".to_string(),
+            },
+            tab_id: None,
+            agent_id: "copilot".to_string(),
+        });
+        // Common case: transient Reconnecting, NOT the setup screen (no flash).
+        assert!(
+            !matches!(app.mode, AppMode::Setup),
+            "recovery must NOT flash the sign-in screen"
+        );
+        assert!(
+            matches!(app.state, ConnectionState::Connecting(_)),
+            "recovery must show a transient Reconnecting state"
+        );
+        let generation = app.auth_recovery_generation;
+        // A STALE timer (older generation) must be ignored — it must not force
+        // the sign-in screen onto the current Connecting state.
+        app.handle_event(AppEvent::AuthRecoveryTimedOut {
+            agent_id: "copilot".to_string(),
+            generation: generation.wrapping_sub(1),
+        });
+        assert!(
+            !matches!(app.mode, AppMode::Setup),
+            "a stale-generation timeout must be ignored"
+        );
+        // Dead-man fallback (restart never took effect) → sign-in screen.
+        app.handle_event(AppEvent::AuthRecoveryTimedOut {
+            agent_id: "copilot".to_string(),
+            generation,
+        });
+        assert!(
+            matches!(app.mode, AppMode::Setup),
+            "timeout fallback must surface the sign-in screen"
+        );
     }
 
     /// The degraded latch (`App::transport_lost`) drives the slash-command
