@@ -96,6 +96,7 @@ namespace winrt::Microsoft::Terminal::Settings::Model::implementation
         hstring EffectiveDelegateAgent() const;
         bool EffectiveAutoErrorDetectionEnabled() const;
         bool EffectiveAutoFixEnabled() const;
+        bool EffectiveAgentSessionManagementEnabled() const;
         bool EffectiveAgentPaneYoloMode() const;
 
         // Whether GPO policy is actively restricting these settings.
